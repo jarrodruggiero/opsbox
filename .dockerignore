@@ -1,0 +1,5 @@
+# The build context is only what the Dockerfile copies, and never bytecode a
+# local test run left behind.
+*
+!rootfs/
+**/__pycache__
