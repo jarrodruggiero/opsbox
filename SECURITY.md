@@ -34,8 +34,11 @@ not need to.
 Two things are not this repository's:
 
 - A vulnerability in a tool the image carries (Claude Code, kubectl, Terraform
-  and the rest). Please report it to that project. The weekly release picks up
-  its fix once the project ships it.
+  and the rest). Please report it to that project. Once it ships a fix:
+  - Claude Code, gh, Helm and the Debian packages arrive with the next weekly
+    release, without anyone doing anything;
+  - the tools pinned in the Dockerfile arrive as a Dependabot pull request,
+    released when it is merged.
 - What you allow Claude Code to do inside the box. The image keeps your keys
   in your volume and drops every privilege it can, but anything with your
   kubeconfig can do what your kubeconfig can do.

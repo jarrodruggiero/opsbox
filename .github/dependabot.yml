@@ -18,10 +18,31 @@ updates:
       # release rather than a patch.
       minor-and-patch:
         update-types: [minor, patch]
+        # These are 0.x, where a minor version is the breaking step (uv 0.13 to
+        # 0.14) and makes a minor release. Only their patches join a group; their
+        # minors arrive on their own, as anyone else's major does.
+        exclude-patterns:
+          - astral-sh/uv
+          - cilium/cilium-cli
+          - koalaman/shellcheck
+          - restic/restic
+          - terraform-docs/terraform-docs
+          - terraform-linters/tflint
+      # Keep this list the same as the exclusions above.
+      zero-x-patches:
+        patterns:
+          - astral-sh/uv
+          - cilium/cilium-cli
+          - koalaman/shellcheck
+          - restic/restic
+          - terraform-docs/terraform-docs
+          - terraform-linters/tflint
+        update-types: [patch]
     ignore:
       # Odd-numbered Node.js majors never become LTS. Move to the next even one
-      # by hand when it does (Node 28 in October 2027).
-      - dependency-name: library/node
+      # by hand when it does (Node 28 in October 2027). A wildcard, because
+      # Dependabot may name docker.io/library/node either node or library/node.
+      - dependency-name: "*node"
         update-types: [version-update:semver-major]
 
   - package-ecosystem: github-actions

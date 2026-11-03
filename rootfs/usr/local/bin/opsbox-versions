@@ -59,6 +59,10 @@ def tool_version(argv: list[str]) -> str | None:
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
+    # A binary that can't run still prints numbers: "version `GLIBC_2.43'
+    # not found" would otherwise be recorded as version 2.43, and pass.
+    if result.returncode != 0:
+        return None
     for stream in (result.stdout, result.stderr):
         match = VERSION.search(stream)
         if match:

@@ -12,9 +12,10 @@
 # same scripts work on another CI system.
 #
 # Order matters: the image is tagged before the git tag and the GitHub release
-# exist. A run that fails part way leaves no tag, so the next run works out the
-# same version and finishes the job. A git tag pointing at no image cannot
-# happen.
+# exist, so a git tag pointing at no image can't happen. A published X.Y.Z is
+# never replaced: scripts/publish-image.sh refuses one that already holds
+# different images, which is what a fresh run after a failed `gh release
+# create` would build. That case stops with an error for a human.
 name: Release
 
 on:
@@ -35,6 +36,9 @@ concurrency:
 jobs:
   # Is a release due? Builds amd64 locally and compares it with the last release.
   plan:
+    # Releases come from main only. A dispatch on another branch would publish
+    # unreviewed code as `latest` and tag a commit main never descends from.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -46,9 +50,17 @@ jobs:
         with:
           fetch-depth: 0 # every tag, to find the last release
           persist-credentials: false
+      # BuildKit is pinned and bumped by hand, since Dependabot doesn't read
+      # images given to an action. The Dockerfile names Docker Hub images as
+      # docker.io/..., so Dependabot sees Docker Hub's full tag list, while the
+      # pulls themselves go through mirror.gcr.io: Docker Hub rate-limits
+      # GitHub's shared runners.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
@@ -70,6 +82,7 @@ jobs:
       - name: Test the candidate
         env:
           OPSBOX_IMAGE: opsbox:candidate
+          OPSBOX_REQUIRE_IMAGE: "1"
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet --require-hashes -r requirements-dev.txt
@@ -110,6 +123,9 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
@@ -135,24 +151,35 @@ jobs:
           pull: true
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+          # Written, never read here: pull requests can restore a cache from
+          # main, so their builds start warm.
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
       # The image just pushed, on its own architecture, before anything tags it.
+      # Pulled first, so the first test's timeout isn't spent downloading it.
       - name: Test the pushed image
         env:
           OPSBOX_IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          OPSBOX_REQUIRE_IMAGE: "1"
         run: |
+          docker pull --quiet "$OPSBOX_IMAGE"
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet --require-hashes -r requirements-dev.txt
           "$RUNNER_TEMP/venv/bin/python" -m pytest -q tests/test_image.py
-      - name: Record the digest
+      # The digest, and this architecture's versions.txt for the release.
+      - name: Record the build
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          mkdir -p "$RUNNER_TEMP/digests"
-          echo "$DIGEST" > "$RUNNER_TEMP/digests/${{ matrix.arch }}"
+          mkdir -p "$RUNNER_TEMP/build"
+          echo "$DIGEST" > "$RUNNER_TEMP/build/digest-$ARCH"
+          docker run --rm --entrypoint cat "$IMAGE" /usr/local/share/opsbox/versions.txt \
+            > "$RUNNER_TEMP/build/versions-$ARCH.txt"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: digest-${{ matrix.arch }}
-          path: ${{ runner.temp }}/digests/${{ matrix.arch }}
+          name: build-${{ matrix.arch }}
+          path: ${{ runner.temp }}/build/
           if-no-files-found: error
           retention-days: 1
 
@@ -163,6 +190,8 @@ jobs:
     permissions:
       contents: write # the tag and the GitHub release
       packages: write # the image's tags
+      id-token: write # sign the provenance attestation
+      attestations: write # and store it
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -170,12 +199,15 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: digest-*
-          path: ${{ runner.temp }}/digests
+          pattern: build-*
+          path: ${{ runner.temp }}/build
           merge-multiple: true
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
@@ -184,44 +216,50 @@ jobs:
 
       # The version again, from the amd64 image that was actually pushed, so the
       # notes describe what ships rather than what `plan` built minutes earlier.
+      # Only amd64 is compared. A change that reaches arm64 alone (a Debian
+      # rebuild for one architecture) waits for the next release, which the
+      # floating tools' updates make about a week at most. When the two differ
+      # in their tools, the warning below says so.
       - name: Version and notes from the pushed image
         id: version
+        working-directory: ${{ runner.temp }}/build
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          notes="$RUNNER_TEMP/notes.md"
-          version=$(scripts/plan-release.sh --notes "$notes" "$image@$(cat "$RUNNER_TEMP/digests/amd64")" "$image")
+          version=$("$GITHUB_WORKSPACE/scripts/plan-release.sh" --notes notes.md \
+            "$image@$(cat digest-amd64)" "$image")
           if [ -z "$version" ]; then
             echo "::error::plan found a release due, but the pushed image matches the last release"
             exit 1
           fi
-          docker run --rm "$image@$(cat "$RUNNER_TEMP/digests/amd64")" \
-            cat /usr/local/share/opsbox/versions.txt > "$RUNNER_TEMP/versions.txt"
+          if ! diff <(grep '^tool' versions-amd64.txt) <(grep '^tool' versions-arm64.txt); then
+            echo "::warning::amd64 and arm64 carry different tool versions; see the two versions files on the release"
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # v1.2.3 publishes 1.2.3, 1.2, 1 and latest. Releases only ever move
-      # forward from main, so each one is the newest of its line.
-      - name: Image tags
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ghcr.io/${{ github.repository }}
-          flavor: latest=true
-          tags: |
-            type=semver,pattern={{version}},value=${{ steps.version.outputs.version }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }}
-            type=semver,pattern={{major}},value=${{ steps.version.outputs.version }}
-
+      # Never replaces a published X.Y.Z; see scripts/publish-image.sh.
       - name: Tag the image
-        working-directory: ${{ runner.temp }}/digests
+        id: tag
+        working-directory: ${{ runner.temp }}/build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
-          args=()
-          for tag in "${tags[@]}"; do args+=(--tag "$tag"); done
-          docker buildx imagetools create "${args[@]}" "$image@$(cat amd64)" "$image@$(cat arm64)"
-          docker buildx imagetools inspect "$image:${{ steps.meta.outputs.version }}"
+          "$GITHUB_WORKSPACE/scripts/publish-image.sh" "$image" "$VERSION" \
+            "$image@$(cat digest-amd64)" "$image@$(cat digest-arm64)"
+          digest=$(docker buildx imagetools inspect "$image:${VERSION#v}" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Signed provenance for the published image, so anyone can check it came
+      # from this workflow and this commit:
+      #   gh attestation verify oci://ghcr.io/jarrodruggiero/opsbox:1 -R jarrodruggiero/opsbox
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.tag.outputs.digest }}
+          push-to-registry: true
 
       - name: Create the release
+        working-directory: ${{ runner.temp }}/build
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -229,5 +267,5 @@ jobs:
           gh release create "$VERSION" \
             --target "$GITHUB_SHA" \
             --title "$VERSION" \
-            --notes-file "$RUNNER_TEMP/notes.md" \
-            "$RUNNER_TEMP/versions.txt"
+            --notes-file notes.md \
+            versions-amd64.txt versions-arm64.txt

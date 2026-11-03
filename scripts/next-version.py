@@ -25,8 +25,9 @@ The rules, in order:
    versions it is the second (uv 0.13 to 0.14 is the breaking step), and a
    calendar version (a first number of 1000 or more, like mise's
    2026.10.25) never has one: its year rolling over breaks nothing. A
-   version that can't be read counts as a major change, because guessing
-   big is safe and guessing small could ship a break as a patch.
+   switch between the two schemes, and a version that can't be read, count
+   as a major change, because guessing big is safe and guessing small could
+   ship a break as a patch.
 
 It prints the next version, with its leading v, on stdout, or nothing when
 no release is due, and one line on stderr saying why. With --notes, when a
@@ -126,10 +127,14 @@ def is_major_change(old: str | None, new: str | None) -> bool:
     # If either is unreadable, treat as major.
     if old_nums is None or new_nums is None:
         return True
-    # Calendar version (first number >= 1000): year rolling over is not a
-    # break, so never major.
-    if old_nums[0] >= 1000 or new_nums[0] >= 1000:
+    # Two calendar versions (first number >= 1000): the year rolling over is
+    # not a break. A switch between calendar and semantic versioning, in
+    # either direction, is a change of scheme, so it counts as major.
+    old_calendar, new_calendar = old_nums[0] >= 1000, new_nums[0] >= 1000
+    if old_calendar and new_calendar:
         return False
+    if old_calendar != new_calendar:
+        return True
     # 0.x versions: the second number is the breaking one.
     # A missing second number counts as 0.
     if old_nums[0] == 0 and new_nums[0] == 0:

@@ -125,6 +125,14 @@ def test_calendar_version_is_never_major():
     assert d.version == "v1.2.4"
 
 
+def test_switching_version_scheme_is_major():
+    """Semantic to calendar versioning, or back, is a minor release."""
+    for old, new in (("1.2.3", "2026.1.0"), ("2026.10.25", "1.0.0")):
+        d = nv.decide(manifest(mise=new), major=1,
+                      previous=manifest(mise=old), last_tag="v1.2.3")
+        assert d.version == "v1.3.0", (old, new)
+
+
 def test_tool_added_or_removed_is_minor():
     """Adding or removing a tool is a minor bump."""
     prev = manifest(node="26.13.0")

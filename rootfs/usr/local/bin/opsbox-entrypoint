@@ -13,6 +13,10 @@ readonly SCRIPT_NAME="${0##*/}"
 readonly WORKDIR="${OPSBOX_WORKDIR:-$HOME/workspace}"
 readonly SIGN_IN_POLL_SECONDS=30
 readonly SIGN_IN_REMIND_SECONDS=900
+# By full path: PATH starts with ~/.local/bin, which lives in the volume, so
+# anything that ever wrote a `claude` there would otherwise become the Remote
+# Control server on every start, through every image upgrade.
+readonly CLAUDE=/usr/bin/claude
 
 # ---------------------------------------------------------------------------
 # usage and utilities
@@ -51,28 +55,50 @@ log() {
   echo "${SCRIPT_NAME}: $*" >&2
 }
 
-# check_home - ensure HOME is writable, die otherwise.
+# check_home - ensure HOME is writable, and private, die otherwise.
 check_home() {
   if [ ! -w "$HOME" ]; then
     die "\$HOME ($HOME) is not writable (uid=$(id -u) gid=$(id -g)); mount a volume at \$HOME owned by them, for example by running chown $(id -u):$(id -g) on the host directory."
   fi
+  # A bind-mounted directory arrives with whatever mode `mkdir` gave it on the
+  # host, usually 0755: the keys in it would be readable by every user there.
+  chmod go-rwx "$HOME"
 }
 
 # ---------------------------------------------------------------------------
 # sign-in
 # ---------------------------------------------------------------------------
 
-# signed_in - check whether claude is authenticated.
-signed_in() {
-  claude auth status >/dev/null 2>&1
+# auth_method - print how Claude Code is signed in: none, api_key,
+# oauth_token, or the claude.ai sign-in Remote Control needs.
+auth_method() {
+  local status
+  status="$("$CLAUDE" auth status 2>/dev/null)" || true
+  jq -r 'if .loggedIn then .authMethod else "none" end' <<<"$status" 2>/dev/null \
+    || echo none
+}
+
+# sign_in_problem <method> - print what stops Remote Control starting, if
+# anything. An API key or a setup-token counts as signed in, but neither can
+# start Remote Control: `claude remote-control` would exit and the container
+# would restart in a loop without ever saying why.
+sign_in_problem() {
+  case "$1" in
+    none)
+      echo "not signed in to Claude Code yet; from the Docker host run: docker exec -it <container> claude auth login"
+      ;;
+    api_key | oauth_token)
+      echo "signed in with an API key or a setup-token (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN), which can't start Remote Control; remove it and run: docker exec -it <container> claude auth login"
+      ;;
+  esac
 }
 
 # wait_for_sign_in - wait until claude is signed in, logging reminders.
 wait_for_sign_in() {
-  local waited=0
-  until signed_in; do
+  local waited=0 problem
+  while problem="$(sign_in_problem "$(auth_method)")" && [[ -n "$problem" ]]; do
     if (( waited % SIGN_IN_REMIND_SECONDS == 0 )); then
-      log "not signed in to Claude Code yet; from the Docker host run: docker exec -it <container> claude auth login"
+      log "$problem"
     fi
     sleep "$SIGN_IN_POLL_SECONDS"
     (( waited += SIGN_IN_POLL_SECONDS )) || true
@@ -90,7 +116,7 @@ run_remote_control() {
   wait_for_sign_in
   cd "$WORKDIR"
   log "starting claude remote-control in $WORKDIR (first start: docker attach to answer the trust question)"
-  exec claude remote-control "$@"
+  exec "$CLAUDE" remote-control "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -99,6 +125,9 @@ run_remote_control() {
 
 # main - dispatch based on first argument.
 main() {
+  # Files the box writes (Terraform state, clones, tokens) are for its own
+  # user alone, whatever the host directory's mode.
+  umask 077
   case "${1:-}" in
     -h|--help)
       usage
