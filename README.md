@@ -184,4 +184,4 @@ of the repository would pass.
 
 ## Licence
 
-[AGPL-3.0](LICENSE).
+[MIT](LICENSE).
