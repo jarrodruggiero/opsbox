@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Print every baked tool's version and every Debian package's version.
+
+Each line is tab-separated: kind<TAB>name<TAB>version, where kind is
+"tool" or "deb". The output is sorted by kind then name.
+
+Exits 1, naming each tool that is missing or printed no version, because
+the image build runs this as a smoke test. The release pipeline compares
+this output with the previous release's to choose the next version.
+And "deb" lines are what make a Debian security update visible to it.
+"""
+from __future__ import annotations
+
+import re
+import shutil
+import subprocess
+import sys
+
+TOOLS: dict[str, list[str]] = {
+    "claude": ["claude", "--version"],
+    "cilium": ["cilium", "version", "--client"],
+    "docker": ["docker", "--version"],
+    "docker-buildx": ["docker", "buildx", "version"],
+    "docker-compose": ["docker", "compose", "version"],
+    "gh": ["gh", "--version"],
+    "helm": ["helm", "version", "--short"],
+    "kubectl": ["kubectl", "version", "--client"],
+    "mise": ["mise", "--version"],
+    "node": ["node", "--version"],
+    "npm": ["npm", "--version"],
+    "restic": ["restic", "version"],
+    "shellcheck": ["shellcheck", "--version"],
+    "talosctl": ["talosctl", "version", "--client"],
+    "terraform": ["terraform", "version"],
+    "terraform-docs": ["terraform-docs", "--version"],
+    "tflint": ["tflint", "--version"],
+    "uv": ["uv", "--version"],
+}
+
+# The first dotted number a tool prints is its own version for every entry
+# above (kubectl prints its own before Kustomize's, cilium its own before
+# the default Cilium image's).
+VERSION = re.compile(r"v?(\d+\.\d+(?:\.\d+)?)")
+
+TIMEOUT_SECONDS = 60
+
+
+def tool_version(argv: list[str]) -> str | None:
+    """Return the version string for a tool, or None if missing."""
+    if shutil.which(argv[0]) is None:
+        return None
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    for stream in (result.stdout, result.stderr):
+        match = VERSION.search(stream)
+        if match:
+            return match.group(1)
+    return None
+
+
+def deb_versions() -> list[tuple[str, str]]:
+    """Return (name, version) pairs for every installed Debian package."""
+    # ${Package}, not ${binary:Package}, so names carry no :amd64 suffix
+    # and the two architectures' lists compare.
+    result = subprocess.run(
+        ["dpkg-query", "-W", "-f", "${Package}\t${Version}\n"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    lines = [line for line in result.stdout.splitlines() if line]
+    return [tuple(line.split("\t", 1)) for line in lines]
+
+
+def main(argv: list[str]) -> int:
+    """Print version lines for all tools and packages; exit 1 on failure."""
+    if "-h" in argv or "--help" in argv:
+        print(__doc__)
+        return 0
+    lines: list[tuple[str, str, str]] = []
+    failures: list[str] = []
+    for name, cmd in TOOLS.items():
+        ver = tool_version(cmd)
+        if ver is None:
+            failures.append(name)
+        else:
+            lines.append(("tool", name, ver))
+    for name, ver in deb_versions():
+        lines.append(("deb", name, ver))
+    for kind, name, ver in sorted(lines):
+        print(f"{kind}\t{name}\t{ver}")
+    if failures:
+        print(
+            f"opsbox-versions: no version from: {', '.join(failures)}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

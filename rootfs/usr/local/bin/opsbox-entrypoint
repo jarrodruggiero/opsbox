@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+#
+# opsbox-entrypoint - start Claude Code Remote Control, or run a command.
+# See usage() or --help for details.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# constants
+# ---------------------------------------------------------------------------
+
+readonly SCRIPT_NAME="${0##*/}"
+readonly WORKDIR="${OPSBOX_WORKDIR:-$HOME/workspace}"
+readonly SIGN_IN_POLL_SECONDS=30
+readonly SIGN_IN_REMIND_SECONDS=900
+
+# ---------------------------------------------------------------------------
+# usage and utilities
+# ---------------------------------------------------------------------------
+
+# usage - print how to invoke this script.
+usage() {
+  cat <<EOF
+Usage: opsbox-entrypoint [remote-control [OPTIONS...]]
+       opsbox-entrypoint COMMAND [ARGS...]
+
+With remote-control (the image's default command) or no arguments: wait
+until Claude Code is signed in, then run claude remote-control OPTIONS...
+in WORKDIR. Any other COMMAND runs as given, for example bash or
+opsbox-versions.
+
+Environment: OPSBOX_WORKDIR, the directory sessions start in (default
+$HOME/workspace). It must not be $HOME itself, because Claude Code never
+saves a trust answer for the home directory.
+
+One-time steps:
+  Sign in with:
+  docker exec -it <container> claude auth login
+  On the first start docker attach <container> to answer the directory-
+  trust question, detaching with Ctrl-P Ctrl-Q.
+EOF
+}
+
+# die - print an error message and exit.
+die() {
+  echo "${SCRIPT_NAME}: error: $*" >&2; exit 1
+}
+
+# log - print a log message to stderr.
+log() {
+  echo "${SCRIPT_NAME}: $*" >&2
+}
+
+# check_home - ensure HOME is writable, die otherwise.
+check_home() {
+  if [ ! -w "$HOME" ]; then
+    die "\$HOME ($HOME) is not writable (uid=$(id -u) gid=$(id -g)); mount a volume at \$HOME owned by them, for example by running chown $(id -u):$(id -g) on the host directory."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# sign-in
+# ---------------------------------------------------------------------------
+
+# signed_in - check whether claude is authenticated.
+signed_in() {
+  claude auth status >/dev/null 2>&1
+}
+
+# wait_for_sign_in - wait until claude is signed in, logging reminders.
+wait_for_sign_in() {
+  local waited=0
+  until signed_in; do
+    if (( waited % SIGN_IN_REMIND_SECONDS == 0 )); then
+      log "not signed in to Claude Code yet; from the Docker host run: docker exec -it <container> claude auth login"
+    fi
+    sleep "$SIGN_IN_POLL_SECONDS"
+    (( waited += SIGN_IN_POLL_SECONDS )) || true
+  done
+}
+
+# run_remote_control - check HOME, create WORKDIR, wait for sign-in, exec.
+run_remote_control() {
+  check_home
+  # Resolved, so a trailing slash or a /. can't sneak $HOME past the check.
+  if [ "$(realpath -m -- "$WORKDIR")" = "$(realpath -m -- "$HOME")" ]; then
+    die "OPSBOX_WORKDIR is \$HOME; use a directory under it, because Claude Code never saves a trust answer for the home directory"
+  fi
+  mkdir -p "$WORKDIR"
+  wait_for_sign_in
+  cd "$WORKDIR"
+  log "starting claude remote-control in $WORKDIR (first start: docker attach to answer the trust question)"
+  exec claude remote-control "$@"
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+# main - dispatch based on first argument.
+main() {
+  case "${1:-}" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    remote-control)
+      shift
+      run_remote_control "$@"
+      ;;
+    "")
+      run_remote_control
+      ;;
+    *)
+      exec "$@"
+      ;;
+  esac
+}
+
+main "$@"
