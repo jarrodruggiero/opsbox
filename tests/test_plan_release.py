@@ -193,6 +193,23 @@ def test_build_file_change_is_a_patch(env: Helpers) -> None:
     assert result.stdout == "v1.0.1\n"
 
 
+def test_refuses_to_release_behind_the_last_tag(env: Helpers) -> None:
+    """A run at a commit the last release doesn't descend from fails.
+
+    Re-running an old workflow run after a newer release would otherwise
+    publish older code as the next version and move `latest` back onto it.
+    """
+    env.commit("rootfs/usr/local/bin/opsbox-entrypoint", "#!/bin/sh\n# newer\n")
+    env.tag("v1.0.1")
+    subprocess.run(["git", "checkout", "-q", "HEAD~1"], cwd=env.repo, check=True)
+    env.image("cand", MANIFEST)
+    env.image("reg/opsbox:1.0.1", MANIFEST)
+    result = env.run("cand", "reg/opsbox")
+    assert result.returncode != 0
+    assert "not an ancestor" in result.stderr
+    assert result.stdout == ""
+
+
 def test_other_changes_release_nothing(env: Helpers) -> None:
     """A change to README.md alone releases nothing."""
     env.tag("v1.0.0")

@@ -14,14 +14,15 @@ Unofficial; not affiliated with Anthropic.
 | --- | --- | --- |
 | kubectl, talosctl, Terraform, TFLint, terraform-docs, uv, Node.js and npm, the Docker CLI with buildx and compose, cilium-cli, restic, ShellCheck, mise | Each project's own image, pinned by digest | Dependabot pull requests |
 | Claude Code (stable channel), gh | The vendor's signed apt repository | The weekly release |
-| Helm 4 | The official tarball from get.helm.sh, checked against its published sha256 | The weekly release |
+| Helm 4 | The official tarball from get.helm.sh, checked against its maintainers' signature | The weekly release |
 | git, ssh, curl, jq, make, Python 3 with PyYAML, psql, sqlite3, tmux, dig, ping, nc, rsync and GNU coreutils | Debian 13 (trixie) | The weekly release, which also picks up Debian security fixes |
 
 `docker run --rm ghcr.io/jarrodruggiero/opsbox opsbox-versions` lists the exact
 versions in an image. Every release also attaches that list as `versions.txt`.
 
-There is no Docker engine, no sudo and no root at run time. Everything runs as
-`opsbox` (uid 1000).
+There is no Docker engine, no sudo, no setuid binary and no root at run time.
+Everything runs as `opsbox` (uid 1000), which can write only to its home and
+the temporary directories, and every file it writes is private to it.
 
 ## Running it
 
@@ -32,14 +33,23 @@ once, after the first start:
    it prints. Remote Control needs a claude.ai sign-in on a Pro, Max, Ultra,
    Team or Enterprise plan. A `claude setup-token` token or an API key can't
    start Remote Control sessions.
-2. **Trust the workspace:** `docker attach opsbox`, answer the question about
-   trusting `~/workspace`, then detach with Ctrl-P Ctrl-Q.
+2. **Trust the workspace:** `docker attach opsbox`. The question about trusting
+   `~/workspace` was printed before you attached, so the screen may look blank
+   (`docker logs opsbox` shows it): type `y` and Enter, then detach with Ctrl-P
+   Ctrl-Q.
 
 The box then shows up under Remote Control in the Claude app and at
 claude.ai/code, and new sessions start in `~/workspace`.
 
 If the network drops for more than about 10 minutes, `claude remote-control`
 exits, and the restart policy brings it back.
+
+**Trusting `~/workspace` trusts everything under it.** Claude Code carries a
+directory's trust down to every directory inside it, so a repository cloned
+there can run its own hooks and settings (`.claude/settings.json`) with all
+your keys, without asking. Keep `~/workspace` for repositories you control.
+Clone anything else, such as someone else's project or a pull request from a
+fork, outside it, in `~/untrusted` say, where Claude Code asks first.
 
 ### Your keys
 
@@ -52,10 +62,12 @@ in the image:
 - **talosctl:** `~/.talos/config`
 - **gh:** `~/.config/gh`, set up with `gh auth login`
 - **Terraform:** `~/.terraform.d/credentials.tfrc.json`
-- **Repositories:** clone them into `~/workspace`
+- **Repositories:** clone them into `~/workspace` (see the trust note above)
 
-The volume must be owned by uid 1000. Back it up, and protect it like the keys
-it holds.
+The volume must be owned by uid 1000: `mkdir -m 0700 home && sudo chown
+1000:1000 home`. On every start the entrypoint takes away other users' access
+to it too, whatever mode it was created with. Back it up, and protect it like
+the keys it holds.
 
 Give the box the narrowest credentials that do the job. Anything that can read
 your kubeconfig can do what your kubeconfig can do, and Claude can read it.
@@ -68,12 +80,14 @@ once in it:
     mise trust && mise install
 
 From then on, that repository gets its pinned versions, and everywhere else
-gets the baked ones. Do this before running Terraform in a repository whose CI
-uses an older version than the image. A newer Terraform can write state that
-an older one isn't guaranteed to read.
+gets the baked ones. Until then its pins are ignored, so do this before running
+Terraform in a repository whose CI uses an older version than the image: a
+newer Terraform can write state that an older one isn't guaranteed to read.
 
-`mise trust` is per repository on purpose: a trusted `.mise.toml` can run
-commands, so don't trust one you haven't read.
+Trust covers the file's exact contents (the image sets `MISE_PARANOID`). A
+mise config can run commands, so when a pull changes it, mise refuses to run
+until you've read the change and run `mise trust` again. An untrusted
+`.tool-versions` is refused the same way.
 
 ### Network
 
@@ -94,8 +108,9 @@ either one turns Remote Control off.
 ### Docker
 
 The image has the Docker CLI but no engine. To build images from the box, give
-it an engine of its own: a VM, or a rootless engine. Never give it the host's
-socket, because the Docker socket is root on the machine it belongs to.
+it an engine of its own, in a VM, and point the CLI at it with
+`DOCKER_HOST=ssh://user@vm`. Never give it the host's socket: whatever can
+reach a Docker socket is root on the machine the engine runs on.
 
 ## Versions
 
@@ -115,8 +130,32 @@ is the second, and calendar versions such as mise's `2026.10.25`, where it
 never counts. [`scripts/next-version.py`](scripts/next-version.py) applies
 these rules, and its tests pin them.
 
-Each release `vX.Y.Z` is published as `X.Y.Z`, `X.Y`, `X` and `latest`. To get
-updates without breaking changes, follow `X`.
+Each release `vX.Y.Z` is published as `X.Y.Z`, `X.Y`, `X` and `latest`:
+
+- **`X`** gets every release until a big refactor raises the major version. That
+  includes tool majors (minor releases), which can break a script.
+- **`X.Y`** gets only patch releases.
+- **`X.Y.Z`** never changes.
+
+Nothing pulls by itself. To update: `docker compose pull && docker compose up
+-d`. Only the newest release gets fixes, Claude Code's and Debian's included,
+so a pin on `X.Y` or `X.Y.Z` stops getting them when the next release lands.
+
+To check that an image was built by this repository's release workflow:
+
+    gh attestation verify oci://ghcr.io/jarrodruggiero/opsbox:1 -R jarrodruggiero/opsbox
+
+### When a release is bad
+
+1. Pin the last good `X.Y.Z` in your compose file.
+2. Maintainers: point `X`, `X.Y` and `latest` back at it with `docker buildx
+   imagetools create`, and disable the Release workflow (`gh workflow disable
+   Release`) until a fix is merged. Otherwise the next run, or the weekly one,
+   rebuilds with the same newest packages and moves them forward again.
+3. Never delete a published image version or its git tag. A missing image
+   stops every later release, because each one compares itself with the last.
+   A deleted tag hands its number to the next release, under different
+   contents.
 
 ## Changing it
 
@@ -128,6 +167,10 @@ updates without breaking changes, follow `X`.
 - **To test the scripts:** `python3 -m pytest tests`.
 - **To test a built image:** `docker build -t opsbox:dev .`, then
   `OPSBOX_IMAGE=opsbox:dev python3 -m pytest tests/test_image.py`.
+- **Keep `main` active.** GitHub turns off scheduled workflows in a public
+  repository after 60 days without activity, and the weekly release is the only
+  way gh, Claude Code, Helm and Debian fixes arrive. It emails first; turn the
+  workflow back on from the Actions tab.
 
 ## Licence
 

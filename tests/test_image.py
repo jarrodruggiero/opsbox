@@ -19,7 +19,17 @@ from pathlib import Path
 import pytest
 
 IMAGE = os.environ.get("OPSBOX_IMAGE")
+
+# The workflows set OPSBOX_REQUIRE_IMAGE beside OPSBOX_IMAGE. Without it, a
+# renamed variable would turn every gate that runs these tests into a quiet
+# skip, and pytest exits 0 on skips.
+if not IMAGE and os.environ.get("OPSBOX_REQUIRE_IMAGE"):
+    raise RuntimeError("OPSBOX_REQUIRE_IMAGE is set but OPSBOX_IMAGE is not")
+
 pytestmark = pytest.mark.skipif(not IMAGE, reason="OPSBOX_IMAGE is not set")
+
+# Sticky, world-writable temporary directories, as every Debian has.
+SHARED_TMP = {"/tmp", "/var/tmp", "/run/lock", "/var/lock"}
 
 
 def tools() -> set[str]:
@@ -136,6 +146,33 @@ def test_home_has_nothing_baked_in() -> None:
     assert names == {".bashrc", ".bash_logout", ".profile"}
 
 
+def test_nothing_outside_home_is_writable() -> None:
+    """The box's user can change nothing but its home and temp directories.
+
+    COPY --from once kept restic owned by uid 1000, so a session could swap
+    it for one that records RESTIC_PASSWORD.
+    """
+    result = run("sh", "-c", "find / -xdev \\( -path /home -o -path /proc -o -path /sys "
+                 "-o -path /dev \\) -prune -o -writable -print 2>/dev/null; true")
+    assert set(result.stdout.split()) <= SHARED_TMP
+
+
+def test_no_setuid_or_setgid_files() -> None:
+    """No binary can raise privileges, even without no-new-privileges."""
+    result = run("sh", "-c", "find / -xdev -perm /6000 -type f 2>/dev/null; true")
+    assert result.stdout == ""
+
+
+def test_files_are_private_by_default() -> None:
+    """Everything the box writes is for its own user alone."""
+    assert run("sh", "-c", "umask").stdout == "0077\n"
+
+
+def test_mise_trust_is_per_file() -> None:
+    """MISE_PARANOID ties trust to one config file's contents."""
+    assert run("printenv", "MISE_PARANOID").stdout == "1\n"
+
+
 def test_checkpoint_disabled() -> None:
     """CHECKPOINT_DISABLE is set to 1."""
     result = run("printenv", "CHECKPOINT_DISABLE")
@@ -168,20 +205,34 @@ def test_workdir_cannot_be_home() -> None:
     assert "trust" in stderr
 
 
-def test_waits_for_sign_in() -> None:
-    """The image waits for sign-in; it does not exit immediately."""
-    result = docker("run", "-d", IMAGE)
+def waits_with(message: str, *env: str) -> None:
+    """Start the image detached and check it waits, saying message."""
+    result = docker("run", "-d", *env, IMAGE)
     container_id = result.stdout.strip()
     try:
         for _ in range(20):
             logs = docker("logs", container_id)
             combined = logs.stdout + logs.stderr
-            if "not signed in to Claude Code yet" in combined:
+            if message in combined:
                 break
             time.sleep(1)
         else:
-            pytest.fail("timed out waiting for sign-in message")
+            pytest.fail(f"timed out waiting for {message!r}")
         state = docker("inspect", "-f", "{{.State.Running}}", container_id)
         assert state.stdout.strip() == "true"
     finally:
         docker("rm", "-f", container_id, check=False)
+
+
+def test_waits_for_sign_in() -> None:
+    """The image waits for sign-in; it does not exit immediately."""
+    waits_with("not signed in to Claude Code yet")
+
+
+def test_api_key_waits_instead_of_crash_looping() -> None:
+    """An API key counts as signed in but can't start Remote Control.
+
+    `claude remote-control` would exit at once, and a restart policy would
+    loop without ever saying why.
+    """
+    waits_with("can't start Remote Control", "-e", "ANTHROPIC_API_KEY=sk-ant-api03-not-a-real-key")

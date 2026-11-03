@@ -139,6 +139,11 @@ main() {
   local -a args=(--current "$tmp/current.txt" --major "$major")
 
   if [[ -n "$tag" ]]; then
+    # Releases only move forward. Without this, re-running an old workflow run
+    # (or dispatching one on a branch) would publish older or unmerged code as
+    # the next version, and move `latest` onto it.
+    git -C "$repo" merge-base --is-ancestor "$tag" HEAD \
+      || die "$tag is not an ancestor of HEAD; refusing to release older or unmerged code"
     read_versions "${repository}:${tag#v}" "$tmp/previous.txt"
     args+=(--previous "$tmp/previous.txt" --last-tag "$tag")
     if inputs_changed "$repo" "$tag"; then

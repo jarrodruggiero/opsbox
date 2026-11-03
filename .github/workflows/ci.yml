@@ -57,12 +57,17 @@ jobs:
           # Every tag, for the release preview's "last release".
           fetch-depth: 0
           persist-credentials: false
+      # BuildKit is pinned and bumped by hand, since Dependabot doesn't read
+      # images given to an action. The Dockerfile names Docker Hub images as
+      # docker.io/..., so Dependabot sees Docker Hub's full tag list, while the
+      # pulls themselves go through mirror.gcr.io: Docker Hub rate-limits
+      # GitHub's shared runners.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
-          # Pinned, and bumped by hand: Dependabot does not read images given to
-          # an action. Through mirror.gcr.io for the same reason the Dockerfile
-          # uses it: Docker Hub rate-limits GitHub's shared runners.
           driver-opts: image=mirror.gcr.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       # The build ends by running opsbox-versions, so getting past this step
       # means every tool has run once on this architecture.
@@ -77,12 +82,15 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
-      - name: Lint the entrypoint
-        run: docker run --rm -v "$PWD/rootfs:/src:ro" opsbox:ci shellcheck /src/usr/local/bin/opsbox-entrypoint
+      - name: Lint the shell scripts
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -w /src opsbox:ci shellcheck \
+            rootfs/usr/local/bin/opsbox-entrypoint scripts/*.sh
 
       - name: Test the image
         env:
           OPSBOX_IMAGE: opsbox:ci
+          OPSBOX_REQUIRE_IMAGE: "1"
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet --require-hashes -r requirements-dev.txt
@@ -97,8 +105,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # What merging this pull request would release, worked out the way the
-      # release does it. Information only: it fails until the first release
-      # exists, and must never block a merge.
+      # release does it. Information only: it fails when the last release's
+      # image can't be read, and must never block a merge.
       - name: Release preview
         if: matrix.arch == 'amd64'
         continue-on-error: true
