@@ -1,0 +1,36 @@
+# An example: run opsbox on any machine with Docker Compose.
+#
+#   docker compose up -d
+#   docker exec -it opsbox claude auth login      # once: sign in
+#   docker attach opsbox                          # once: answer the trust question,
+#                                                 # then detach with Ctrl-P Ctrl-Q
+#
+# Everything personal lives in ./home: Claude Code's sign-in and settings, SSH
+# keys, kubeconfig, talosconfig, gh's token, and the repositories you clone
+# into ~/workspace. It must be owned by uid 1000: `mkdir home && sudo chown
+# 1000:1000 home`. Back it up, and keep it as private as the keys in it.
+services:
+  opsbox:
+    image: ghcr.io/jarrodruggiero/opsbox:1
+    container_name: opsbox
+    restart: unless-stopped
+    # `claude remote-control` waits at a terminal; these let `docker attach`
+    # reach it.
+    tty: true
+    stdin_open: true
+    volumes:
+      - ./home:/home/opsbox
+    # Nothing in the image needs a capability or a setuid binary.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # environment:
+    #   # The prefix of each session's name in the Claude app. Default: the
+    #   # container's hostname.
+    #   CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX: opsbox
+    #
+    # To let the box build images, give it a Docker engine of its own (a VM,
+    # or a rootless engine), never the host's: the Docker socket is root on
+    # whatever machine it belongs to.
+    #   - /var/run/docker.sock:/var/run/docker.sock   # under volumes
+    # group_add: ["<the socket's group id>"]

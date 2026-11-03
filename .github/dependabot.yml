@@ -1,0 +1,41 @@
+# Version updates. Every merged pull request is released by the Release
+# workflow, which numbers the release from what changed, so these PRs are
+# the whole of keeping the pinned tools current.
+#
+# Dependabot reads FROM lines only, which is why every tool with an official
+# image has its own stage in the Dockerfile. gh, Claude Code, Helm and the
+# Debian packages are not pinned at all: the weekly release build picks them up.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      # One pull request for the routine drift. A new major version arrives on
+      # its own, because it is the one worth reading first, and it makes a minor
+      # release rather than a patch.
+      minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Odd-numbered Node.js majors never become LTS. Move to the next even one
+      # by hand when it does (Node 28 in October 2027).
+      - dependency-name: library/node
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      test-dependencies:
+        patterns: ["*"]
