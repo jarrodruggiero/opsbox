@@ -9,8 +9,10 @@ from __future__ import annotations
 import importlib
 import importlib.machinery
 import importlib.util
+import io
 import os
 import subprocess
+import tarfile
 import time
 from pathlib import Path
 
@@ -113,11 +115,25 @@ def test_runs_a_command() -> None:
 
 
 def test_home_has_nothing_baked_in() -> None:
-    """The home directory contains only default files."""
-    result = run("ls", "-A", "/home/opsbox")
-    names = set(result.stdout.strip().splitlines())
-    expected = {".bashrc", ".bash_logout", ".profile"}
-    assert names == expected
+    """The image's home directory holds only useradd's skeleton files.
+
+    Keys and sign-ins belong in the volume. This reads the image's own files
+    from a container that never starts, because a running one can gain files
+    the image doesn't have: Docker Desktop's Rosetta writes ~/.cache/rosetta
+    into an emulated amd64 container.
+    """
+    container = docker("create", IMAGE).stdout.strip()
+    try:
+        archive = subprocess.run(
+            ["docker", "cp", f"{container}:/home/opsbox", "-"],
+            capture_output=True, timeout=120, check=True,
+        ).stdout
+    finally:
+        docker("rm", container, check=False)
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        names = {Path(m.name).relative_to("opsbox").as_posix()
+                 for m in tar.getmembers() if m.name != "opsbox"}
+    assert names == {".bashrc", ".bash_logout", ".profile"}
 
 
 def test_checkpoint_disabled() -> None:
