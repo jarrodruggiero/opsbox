@@ -124,6 +124,22 @@ def test_registry_error_is_not_read_as_unpublished(fake) -> None:
     assert not log.exists()
 
 
+def test_failed_source_lookup_stops(fake) -> None:
+    """A source that can't be inspected stops the run, whichever it is.
+
+    The first source's failure once vanished behind the second's success,
+    and the script then claimed the version held different images.
+    """
+    images, log = fake
+    image(images, f"{AMD64}.error", "ERROR: unexpected status 502\n")
+    image(images, f"{REPO}:1.2.3", index("sha256:" + "1" * 64, "sha256:" + "2" * 64))
+    result = run(REPO, "v1.2.3", AMD64, ARM64)
+    assert result.returncode == 1
+    assert f"cannot inspect {AMD64}" in result.stderr
+    assert "already published" not in result.stderr
+    assert not log.exists()
+
+
 def test_bad_version(fake) -> None:
     """Only vX.Y.Z versions are published."""
     _, log = fake

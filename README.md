@@ -18,7 +18,8 @@ Unofficial; not affiliated with Anthropic.
 | git, ssh, curl, jq, make, Python 3 with PyYAML, psql, sqlite3, tmux, dig, ping, nc, rsync and GNU coreutils | Debian 13 (trixie) | The weekly release, which also picks up Debian security fixes |
 
 `docker run --rm ghcr.io/jarrodruggiero/opsbox opsbox-versions` lists the exact
-versions in an image. Every release also attaches that list as `versions.txt`.
+versions in an image. Every release also attaches that list, for each
+architecture, as `versions-amd64.txt` and `versions-arm64.txt`.
 
 There is no Docker engine, no sudo, no setuid binary and no root at run time.
 Everything runs as `opsbox` (uid 1000), which can write only to its home and

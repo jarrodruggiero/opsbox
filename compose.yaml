@@ -33,7 +33,9 @@ services:
     volumes:
       - ./home:/home/opsbox
     # Nothing in the image needs a capability, a setuid binary, or to write
-    # outside its home and /tmp.
+    # outside its home and the temporary directories. Docker mounts those
+    # noexec, so nothing copied into them runs either; tools that need to run
+    # something they downloaded keep it under the home directory.
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true

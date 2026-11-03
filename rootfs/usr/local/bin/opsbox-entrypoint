@@ -69,26 +69,33 @@ check_home() {
 # sign-in
 # ---------------------------------------------------------------------------
 
-# auth_method - print how Claude Code is signed in: none, api_key,
-# oauth_token, or the claude.ai sign-in Remote Control needs.
+# auth_method - print how Claude Code is signed in, from `claude auth status`:
+# none, claude.ai, claude.ai+api-key (a sign-in with an API key set as well),
+# or another method (api_key, oauth_token, api_key_helper, third_party).
 auth_method() {
   local status
   status="$("$CLAUDE" auth status 2>/dev/null)" || true
-  jq -r 'if .loggedIn then .authMethod else "none" end' <<<"$status" 2>/dev/null \
-    || echo none
+  jq -r '
+    if (.loggedIn | not) then "none"
+    elif .authMethod == "claude.ai" and ((.apiKeySource // "none") != "none") then "claude.ai+api-key"
+    else .authMethod end' <<<"$status" 2>/dev/null || echo none
 }
 
 # sign_in_problem <method> - print what stops Remote Control starting, if
-# anything. An API key or a setup-token counts as signed in, but neither can
-# start Remote Control: `claude remote-control` would exit and the container
-# would restart in a loop without ever saying why.
+# anything. Only a claude.ai sign-in can start it. Anything else counts as
+# signed in, but `claude remote-control` would exit and the container would
+# restart in a loop without ever saying why.
 sign_in_problem() {
   case "$1" in
+    claude.ai) ;;
     none)
       echo "not signed in to Claude Code yet; from the Docker host run: docker exec -it <container> claude auth login"
       ;;
-    api_key | oauth_token)
-      echo "signed in with an API key or a setup-token (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN), which can't start Remote Control; remove it and run: docker exec -it <container> claude auth login"
+    claude.ai+api-key)
+      echo "signed in, but an API key is set as well (ANTHROPIC_API_KEY, or an env block in settings), and Remote Control refuses that; remove it"
+      ;;
+    *)
+      echo "signed in with ${1:-an unknown method}, which can't start Remote Control; it needs a claude.ai sign-in: docker exec -it <container> claude auth login"
       ;;
   esac
 }

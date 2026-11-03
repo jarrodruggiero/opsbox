@@ -69,10 +69,13 @@ existing_digests() {
 }
 
 # wanted_digests <source>... - print the platform digests of all the sources.
+# A pipeline's status is its last command's, and a loop's is its last pass's,
+# so each failure is turned into an exit on the spot: otherwise a failed
+# lookup of the first source would vanish behind the second's success.
 wanted_digests() {
   local source
   for source in "$@"; do
-    platform_digests "$source"
+    platform_digests "$source" || die "cannot inspect $source"
   done | sort
 }
 
@@ -98,7 +101,7 @@ main() {
   existing="$(existing_digests "$exact")"
   wanted="$(wanted_digests "$@")"
   if [[ -n "$existing" && "$existing" != "$wanted" ]]; then
-    die "$exact is already published with different images; a published version never changes. Finish that release by hand (create its GitHub release at the commit it was built from), or delete the image tag if it was never announced."
+    die "$exact is already published with different images, and a published version never changes. If an earlier publish tagged it and then failed, re-run that publish (it has the same images); otherwise finish that release by hand, at the commit it was built from."
   fi
 
   docker buildx imagetools create \
