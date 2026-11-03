@@ -51,9 +51,10 @@ die() {
   exit 1
 }
 
-# repo_root - print the absolute path of the git repository root.
+# repo_root - print the absolute path of the git repository it is run in.
 repo_root() {
-  git rev-parse --show-toplevel
+  git rev-parse --show-toplevel 2>/dev/null \
+    || die "run this from inside the opsbox repository: it reads MAJOR_VERSION and the tags there"
 }
 
 # ---------------------------------------------------------------------------

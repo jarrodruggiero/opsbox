@@ -250,6 +250,21 @@ def test_bad_major_version(env: Helpers) -> None:
     assert "MAJOR_VERSION must be a whole number" in result.stderr
 
 
+def test_outside_a_repository_fails_clearly(env: Helpers, tmp_path: Path) -> None:
+    """Run from a directory that isn't a git repository, it says so.
+
+    The release's publish steps once ran in a temporary directory, where this
+    failed with git's own "not a git repository" and stopped every release.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    env.image("cand", MANIFEST)
+    result = subprocess.run(["bash", str(SCRIPT), "cand", "reg/opsbox"], cwd=outside,
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 1
+    assert "run this from inside the opsbox repository" in result.stderr
+
+
 def test_wrong_arguments(env: Helpers) -> None:
     """Passing only one argument prints usage and exits 2."""
     result = env.run("only-one")
