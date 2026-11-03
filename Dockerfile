@@ -147,14 +147,14 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && ln -s ../
 COPY --chown=0:0 --chmod=0755 rootfs/usr/local/bin/ /usr/local/bin/
 
 # Smoke test: every tool must run, on every architecture. It runs as nobody,
-# so a tool's first run can't change the image, and with a throwaway HOME
-# that keeps first-run files out of it. Its output is also the record the
+# so a tool's first run can't change anything outside the temporary
+# directories, and those are emptied below. Its output is also the record the
 # release pipeline compares.
 USER 65534:65534
 RUN set -eu; \
-    home="$(mktemp -d)"; \
-    HOME="$home" opsbox-versions > /tmp/versions.txt; \
-    rm -rf "$home"; \
+    scratch="$(mktemp -d)"; \
+    HOME="$scratch" TMPDIR="$scratch" opsbox-versions > /tmp/versions.txt; \
+    rm -rf "$scratch"; \
     cat /tmp/versions.txt
 USER root
 
@@ -162,10 +162,14 @@ USER root
 # no sudo, and compose sets no-new-privileges. Without the bits, su, passwd,
 # mount and the rest can't raise anyone's privileges in a plain `docker run`
 # either.
+#
+# Interactive shells (`docker exec -it opsbox bash`) start with the same
+# umask the entrypoint sets, so what they write is private too.
 RUN set -eu; \
     install -D -m 0644 /tmp/versions.txt /usr/local/share/opsbox/versions.txt; \
-    rm /tmp/versions.txt; \
-    find / -xdev -perm /6000 -type f -exec chmod a-s {} +
+    find /tmp /var/tmp -mindepth 1 -delete; \
+    find / -xdev -perm /6000 -type f -exec chmod a-s {} +; \
+    echo 'umask 077' >> /etc/bash.bashrc
 
 # mise's shims come before the baked tools, so a repository that pins a
 # version in .mise.toml gets that version once someone has run `mise trust`

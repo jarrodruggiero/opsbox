@@ -124,26 +124,40 @@ def test_runs_a_command() -> None:
     assert result.stdout == "hello\n"
 
 
-def test_home_has_nothing_baked_in() -> None:
-    """The image's home directory holds only useradd's skeleton files.
-
-    Keys and sign-ins belong in the volume. This reads the image's own files
-    from a container that never starts, because a running one can gain files
-    the image doesn't have: Docker Desktop's Rosetta writes ~/.cache/rosetta
-    into an emulated amd64 container.
-    """
+def image_files(path: str) -> set[str]:
+    """The names under path in the image itself, read from a container that
+    never starts: a running one can gain files the image doesn't have
+    (Docker Desktop's Rosetta writes ~/.cache/rosetta into an emulated amd64
+    container)."""
     container = docker("create", IMAGE).stdout.strip()
     try:
         archive = subprocess.run(
-            ["docker", "cp", f"{container}:/home/opsbox", "-"],
+            ["docker", "cp", f"{container}:{path}", "-"],
             capture_output=True, timeout=120, check=True,
         ).stdout
     finally:
         docker("rm", container, check=False)
+    top = Path(path).name
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-        names = {Path(m.name).relative_to("opsbox").as_posix()
-                 for m in tar.getmembers() if m.name != "opsbox"}
-    assert names == {".bashrc", ".bash_logout", ".profile"}
+        return {Path(m.name).relative_to(top).as_posix()
+                for m in tar.getmembers() if m.name != top}
+
+
+def test_home_has_nothing_baked_in() -> None:
+    """The image's home directory holds only useradd's skeleton files.
+
+    Keys and sign-ins belong in the volume.
+    """
+    assert image_files("/home/opsbox") == {".bashrc", ".bash_logout", ".profile"}
+
+
+def test_temporary_directories_ship_empty() -> None:
+    """Nothing the build's tools wrote to /tmp or /var/tmp ships.
+
+    npm once left a V8 compile cache there, owned by nobody.
+    """
+    assert image_files("/tmp") == set()
+    assert image_files("/var/tmp") == set()
 
 
 def test_nothing_outside_home_is_writable() -> None:
@@ -164,8 +178,9 @@ def test_no_setuid_or_setgid_files() -> None:
 
 
 def test_files_are_private_by_default() -> None:
-    """Everything the box writes is for its own user alone."""
+    """What the box's sessions and shells write is for its own user alone."""
     assert run("sh", "-c", "umask").stdout == "0077\n"
+    assert run("bash", "-ic", "umask").stdout.splitlines()[-1] == "0077"
 
 
 def test_mise_trust_is_per_file() -> None:

@@ -181,7 +181,9 @@ jobs:
           name: build-${{ matrix.arch }}
           path: ${{ runner.temp }}/build/
           if-no-files-found: error
-          retention-days: 1
+          # A week, so "Re-run failed jobs" can still finish a publish that
+          # failed after tagging: a fresh run would refuse the tagged X.Y.Z.
+          retention-days: 7
 
   # Join the two architectures under the version's tags, then cut the release.
   publish:
@@ -216,22 +218,27 @@ jobs:
 
       # The version again, from the amd64 image that was actually pushed, so the
       # notes describe what ships rather than what `plan` built minutes earlier.
-      # Only amd64 is compared. A change that reaches arm64 alone (a Debian
-      # rebuild for one architecture) waits for the next release, which the
-      # floating tools' updates make about a week at most. When the two differ
-      # in their tools, the warning below says so.
+      #
+      # Only amd64 decides. A change that reaches arm64 alone, such as a Debian
+      # rebuild for that architecture, ships with the next release amd64 makes;
+      # the floating tools move most weeks. The warning below can only fire when
+      # a release happens and the two architectures' tools differ.
+      #
+      # These steps run in the checkout: plan-release.sh reads the repository's
+      # tags, and gh finds the repository from its git remote.
       - name: Version and notes from the pushed image
         id: version
-        working-directory: ${{ runner.temp }}/build
+        env:
+          BUILD: ${{ runner.temp }}/build
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          version=$("$GITHUB_WORKSPACE/scripts/plan-release.sh" --notes notes.md \
-            "$image@$(cat digest-amd64)" "$image")
+          version=$(scripts/plan-release.sh --notes "$BUILD/notes.md" \
+            "$image@$(cat "$BUILD/digest-amd64")" "$image")
           if [ -z "$version" ]; then
             echo "::error::plan found a release due, but the pushed image matches the last release"
             exit 1
           fi
-          if ! diff <(grep '^tool' versions-amd64.txt) <(grep '^tool' versions-arm64.txt); then
+          if ! diff <(grep '^tool' "$BUILD/versions-amd64.txt") <(grep '^tool' "$BUILD/versions-arm64.txt"); then
             echo "::warning::amd64 and arm64 carry different tool versions; see the two versions files on the release"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -239,19 +246,23 @@ jobs:
       # Never replaces a published X.Y.Z; see scripts/publish-image.sh.
       - name: Tag the image
         id: tag
-        working-directory: ${{ runner.temp }}/build
         env:
+          BUILD: ${{ runner.temp }}/build
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          "$GITHUB_WORKSPACE/scripts/publish-image.sh" "$image" "$VERSION" \
-            "$image@$(cat digest-amd64)" "$image@$(cat digest-arm64)"
+          scripts/publish-image.sh "$image" "$VERSION" \
+            "$image@$(cat "$BUILD/digest-amd64")" "$image@$(cat "$BUILD/digest-arm64")"
           digest=$(docker buildx imagetools inspect "$image:${VERSION#v}" --format '{{json .Manifest}}' | jq -r .digest)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       # Signed provenance for the published image, so anyone can check it came
       # from this workflow and this commit:
-      #   gh attestation verify oci://ghcr.io/jarrodruggiero/opsbox:1 -R jarrodruggiero/opsbox
+      #   gh attestation verify oci://ghcr.io/jarrodruggiero/opsbox:1 -R jarrodruggiero/opsbox \
+      #     --signer-workflow jarrodruggiero/opsbox/.github/workflows/release.yml \
+      #     --source-ref refs/heads/main
+      # Without the last two, an attestation from any workflow on any branch of
+      # the repository would pass.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
@@ -259,13 +270,14 @@ jobs:
           push-to-registry: true
 
       - name: Create the release
-        working-directory: ${{ runner.temp }}/build
         env:
+          BUILD: ${{ runner.temp }}/build
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           gh release create "$VERSION" \
             --target "$GITHUB_SHA" \
             --title "$VERSION" \
-            --notes-file notes.md \
-            versions-amd64.txt versions-arm64.txt
+            --notes-file "$BUILD/notes.md" \
+            "$BUILD/versions-amd64.txt" "$BUILD/versions-arm64.txt"

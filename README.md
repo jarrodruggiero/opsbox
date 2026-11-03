@@ -22,7 +22,8 @@ versions in an image. Every release also attaches that list as `versions.txt`.
 
 There is no Docker engine, no sudo, no setuid binary and no root at run time.
 Everything runs as `opsbox` (uid 1000), which can write only to its home and
-the temporary directories, and every file it writes is private to it.
+the temporary directories. Its home, and what its sessions and shells write,
+are private to it.
 
 ## Running it
 
@@ -143,7 +144,12 @@ so a pin on `X.Y` or `X.Y.Z` stops getting them when the next release lands.
 
 To check that an image was built by this repository's release workflow:
 
-    gh attestation verify oci://ghcr.io/jarrodruggiero/opsbox:1 -R jarrodruggiero/opsbox
+    gh attestation verify oci://ghcr.io/jarrodruggiero/opsbox:1 -R jarrodruggiero/opsbox \
+      --signer-workflow jarrodruggiero/opsbox/.github/workflows/release.yml \
+      --source-ref refs/heads/main
+
+Without the last two flags, an attestation made by any workflow on any branch
+of the repository would pass.
 
 ### When a release is bad
 
@@ -152,7 +158,10 @@ To check that an image was built by this repository's release workflow:
    imagetools create`, and disable the Release workflow (`gh workflow disable
    Release`) until a fix is merged. Otherwise the next run, or the weekly one,
    rebuilds with the same newest packages and moves them forward again.
-3. Never delete a published image version or its git tag. A missing image
+3. If a release stopped after tagging the image but before the GitHub release
+   exists, use **Re-run failed jobs** on that run within a week: a fresh run
+   refuses to replace the tagged version.
+4. Never delete a published image version or its git tag. A missing image
    stops every later release, because each one compares itself with the last.
    A deleted tag hands its number to the next release, under different
    contents.
