@@ -53,6 +53,14 @@ your keys, without asking. Keep `~/workspace` for repositories you control.
 Clone anything else, such as someone else's project or a pull request from a
 fork, outside it, in `~/untrusted` say, where Claude Code asks first.
 
+### On Unraid
+
+The template is `unraid/opsbox.xml`. Its home is a share of its own with SMB
+and NFS export off, owned by 1000:1000 rather than Unraid's usual 99:100,
+because NFS squash makes every client own 99:100 files and SMB shares often
+force root, exposing keys to the LAN. Give it its own address on br0 so
+firewall rules can name it. Never map the Docker socket.
+
 ### Your keys
 
 Everything personal lives in the volume at `/home/opsbox`, and none of it is

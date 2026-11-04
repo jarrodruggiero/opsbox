@@ -1,0 +1,65 @@
+<?xml version="1.0"?>
+<!--
+  Unraid Community Applications template.
+
+  1. Why it does not run as 99:100: Unraid's NFS exports squash every client
+     to 99:100, so files owned by 99:100 belong to every NFS client. SMB
+     shares often force root, so files on an exported share are open to the
+     LAN whatever their owner. opsbox's home goes on a share of its own,
+     with SMB and NFS export both off, owned by 1000:1000 with mode 0700.
+     Not appdata.
+
+  2. ExtraParams: the user flag 1000:1000 (opsbox, not root), the
+     read-only flag, tmpfs /tmp and tmpfs /var/tmp (transient files),
+     cap-drop ALL (drop all capabilities), security-opt no-new-privileges
+     (stops a setuid binary from raising privileges), -it (interactive
+     terminal for the trust question), hostname opsbox (fixed session name
+     across updates), restart=unless-stopped (see point 4).
+  3. After the first start: a. `docker exec -it opsbox claude auth login`,
+     b. `docker attach opsbox`, type y and Enter at the trust question (it
+     was printed before you attached), then detach with Ctrl-P Ctrl-Q.
+
+  4. Restart policy: dockerMan sets no restart policy by default and
+     `claude remote-control` exits after about 10 minutes offline, so the
+     policy brings it back. Use unless-stopped, not always, because stopping
+     the container from the Unraid UI must keep it stopped.
+-->
+<Container version="2">
+  <Name>opsbox</Name>
+  <Repository>ghcr.io/jarrodruggiero/opsbox:1</Repository>
+  <Registry>https://ghcr.io/jarrodruggiero/opsbox</Registry>
+  <Network>br0</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/jarrodruggiero/opsbox/issues</Support>
+  <Project>https://github.com/jarrodruggiero/opsbox</Project>
+  <Overview>
+    Claude Code Remote Control with a homelab toolchain: kubectl, talosctl,
+    Terraform, Helm, gh and more. The keys live only in the Home path.
+    SETUP: create a share of its own with SMB and NFS export off, owned by
+    1000:1000 with mode 0700; set an address for br0; start it; then sign in
+    (see the comment at the top). Unofficial; not affiliated with Anthropic.
+  </Overview>
+  <Category>Tools: Productivity:</Category>
+  <WebUI/>
+  <TemplateURL>https://raw.githubusercontent.com/jarrodruggiero/opsbox/main/unraid/opsbox.xml</TemplateURL>
+  <Icon/>
+  <ExtraParams>--user 1000:1000 --read-only --tmpfs /tmp --tmpfs /var/tmp --cap-drop ALL --security-opt no-new-privileges -it --hostname opsbox --restart=unless-stopped</ExtraParams>
+  <PostArgs/>
+  <DonateText/>
+  <DonateLink/>
+
+  <Config Name="Home" Target="/home/opsbox" Default="/mnt/user/opsbox"
+          Description="Everything personal: keys, sign-ins and cloned repositories. Use a share of its own with SMB and NFS export off, owned by 1000:1000 with mode 0700, and back it up."
+          Mode="rw" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/opsbox</Config>
+
+  <Config Name="Session name prefix" Target="CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX"
+          Default="opsbox"
+          Description="The prefix of each session's name in the Claude app."
+          Type="Variable" Display="advanced" Required="false" Mask="false">opsbox</Config>
+
+  <Config Name="Timezone" Target="TZ" Default="Australia/Melbourne"
+          Description="The timezone for logs and for tools that print local times."
+          Type="Variable" Display="advanced" Required="false" Mask="false">Australia/Melbourne</Config>
+</Container>
