@@ -384,7 +384,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "rc": self.manager.rc.status() if session else {},
             "login": self._login(presession),
             "keys": self.manager.describe_keys() if session else [],
-            "env": keys.get_env() if session else {},
+            # Only what the page manages: LOCAL_LLM_KEY_FILE belongs to its key.
+            "env": {k: v for k, v in keys.get_env().items() if k in keys.ENV_ALLOWED} if session else {},
             "env_allowed": keys.ENV_ALLOWED if session else {},
             "browsers": self.manager.sessions.list() if session else [],
             "flash": flash,
