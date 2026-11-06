@@ -48,8 +48,11 @@ If the network drops for more than about 10 minutes, `claude remote-control`
 exits, and the manager starts it again.
 
 **Who can use the page.** It has no accounts of its own: a browser gets in by
-signing in to Claude as the box's account. While the box is signed out, the
-first sign-in becomes the box's, so finish setup promptly. The page is plain
+signing in to Claude as the box's account. The box belongs to the account of
+its first sign-in, so finish setup promptly; after that, any other account is
+refused, even after you sign the box out. To move the box to another account,
+sign it out, then delete `~/.config/opsbox/manager/owner` from a shell on the
+box (`docker exec opsbox rm ~/.config/opsbox/manager/owner`). The page is plain
 HTTP, so the sign-in code and the browser's session cross the network
 unencrypted: fine on a trusted LAN; anywhere else, put HTTPS in front of it and
 limit who can reach port 8080. It answers only to IP addresses and to the names
