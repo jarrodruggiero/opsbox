@@ -6,7 +6,6 @@ have tagged, so these tests need no registry.
 """
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
 
@@ -40,17 +39,6 @@ esac
 """
 
 
-def index(*platform_digests: str) -> str:
-    """An image index as `imagetools inspect --format '{{json .Manifest}}'`
-    prints it, with an attestation manifest beside each image."""
-    manifests = []
-    for arch, digest in zip(("amd64", "arm64"), platform_digests):
-        manifests.append({"digest": digest, "platform": {"os": "linux", "architecture": arch}})
-        manifests.append({"digest": "sha256:" + "f" * 64, "platform": {"os": "unknown", "architecture": "unknown"}})
-    return json.dumps({"mediaType": "application/vnd.oci.image.index.v1+json",
-                       "digest": "sha256:" + "e" * 64, "manifests": manifests})
-
-
 @pytest.fixture
 def fake(tmp_path, monkeypatch):
     """A fake docker on PATH; returns (images dir, create log path)."""
@@ -62,15 +50,9 @@ def fake(tmp_path, monkeypatch):
     docker.write_text(FAKE_DOCKER)
     docker.chmod(0o755)
     log = tmp_path / "create.log"
-    monkeypatch.setenv("PATH", f"{bin_dir}:{Path('/usr/bin')}:{Path('/bin')}:/opt/homebrew/bin:/usr/local/bin")
+    monkeypatch.setenv("PATH", f"{bin_dir}:{Path('/usr/bin')}:{Path('/bin')}")
     monkeypatch.setenv("FAKE_IMAGES", str(images))
     monkeypatch.setenv("FAKE_LOG", str(log))
-    # Each per-architecture source is an index of one image and its
-    # attestation, as build-push-action pushes it.
-    image(images, AMD64, index("sha256:" + "1" * 64))
-    image(images, ARM64, json.dumps({"mediaType": "application/vnd.oci.image.index.v1+json",
-                                     "manifests": [{"digest": "sha256:" + "2" * 64,
-                                                    "platform": {"os": "linux", "architecture": "arm64"}}]}))
     return images, log
 
 
@@ -95,27 +77,23 @@ def test_new_version_gets_all_four_tags(fake) -> None:
     ]
 
 
-def test_same_images_are_tagged_again(fake) -> None:
-    """A re-run after tagging succeeded but the release failed is safe."""
-    images, log = fake
-    image(images, f"{REPO}:1.2.3", index("sha256:" + "1" * 64, "sha256:" + "2" * 64))
-    result = run(REPO, "v1.2.3", AMD64, ARM64)
-    assert result.returncode == 0, result.stderr
-    assert log.exists()
+def test_published_version_is_refused(fake) -> None:
+    """A published X.Y.Z is never tagged again, whatever it holds.
 
-
-def test_different_images_are_refused(fake) -> None:
-    """A published X.Y.Z is never replaced by a different build."""
+    plan-release.sh has already moved past any version with an image, so
+    reaching one here means something is wrong: stop rather than move a tag
+    people pinned.
+    """
     images, log = fake
-    image(images, f"{REPO}:1.2.3", index("sha256:" + "1" * 64, "sha256:" + "9" * 64))
+    image(images, f"{REPO}:1.2.3", "{}")
     result = run(REPO, "v1.2.3", AMD64, ARM64)
     assert result.returncode == 1
-    assert "already published with different images" in result.stderr
+    assert "already published" in result.stderr
     assert not log.exists()
 
 
 def test_registry_error_is_not_read_as_unpublished(fake) -> None:
-    """Only "not found" means the version is free; any other error stops."""
+    """Only "not found" about this image means it's free; any other error stops."""
     images, log = fake
     image(images, f"{REPO}:1.2.3.error", "ERROR: unexpected status 500\n")
     result = run(REPO, "v1.2.3", AMD64, ARM64)
@@ -124,19 +102,13 @@ def test_registry_error_is_not_read_as_unpublished(fake) -> None:
     assert not log.exists()
 
 
-def test_failed_source_lookup_stops(fake) -> None:
-    """A source that can't be inspected stops the run, whichever it is.
-
-    The first source's failure once vanished behind the second's success,
-    and the script then claimed the version held different images.
-    """
+def test_another_not_found_is_not_read_as_unpublished(fake) -> None:
+    """A missing credential helper says "not found" about an image that exists."""
     images, log = fake
-    image(images, f"{AMD64}.error", "ERROR: unexpected status 502\n")
-    image(images, f"{REPO}:1.2.3", index("sha256:" + "1" * 64, "sha256:" + "2" * 64))
+    image(images, f"{REPO}:1.2.3.error", "ERROR: error getting credentials - err: exec: \"docker-credential-x\": executable file not found in $PATH, out: ``\n")
     result = run(REPO, "v1.2.3", AMD64, ARM64)
     assert result.returncode == 1
-    assert f"cannot inspect {AMD64}" in result.stderr
-    assert "already published" not in result.stderr
+    assert "cannot inspect" in result.stderr
     assert not log.exists()
 
 

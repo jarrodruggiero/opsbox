@@ -29,10 +29,12 @@ tmp=""
 # usage - print a usage message and exit.
 usage() {
   cat <<EOF
-Usage: scripts/plan-release.sh [--notes FILE] CANDIDATE REPOSITORY
+Usage: scripts/plan-release.sh [--notes FILE] [--only-if-newest] CANDIDATE REPOSITORY
 
 Prints the version a release of CANDIDATE would get (vX.Y.Z), or nothing
-when no release is due.
+when no release is due. A version that already has an image is skipped: a
+publish that failed after tagging leaves one with no git tag, and a published
+version never changes.
 
 CANDIDATE is an image reference, a local tag or REPOSITORY@sha256:....
 
@@ -41,8 +43,13 @@ and the last release is REPOSITORY:<last tag without its v>.
 
 --notes FILE writes the release notes there when a release is due.
 
+--only-if-newest prints nothing unless HEAD is the commit main is at on GitHub.
+The next run on main releases this commit too, and GitHub refuses GITHUB_TOKEN
+a release at a commit whose workflow files differ from main's.
+
 Reads MAJOR_VERSION and the git tags of the repository it is run in, needs
-git, docker and python3, and the rules are in scripts/next-version.py.
+git, docker with buildx and python3, plus a signed-in gh for --only-if-newest,
+and the rules are in scripts/next-version.py.
 EOF
 }
 
@@ -93,13 +100,59 @@ inputs_changed() {
   ! git -C "$repo" diff --quiet "$tag" HEAD -- "${IMAGE_INPUTS[@]}"
 }
 
+# newest_on_main - print the commit main is at on GitHub right now. It asks the
+# API with the job's token because GitHub can demand sign-in for anonymous git
+# reads, even of a public repository, and `git ls-remote` would also match a
+# branch whose name merely ends in refs/heads/main.
+newest_on_main() {
+  local sha
+  sha="$(gh api 'repos/{owner}/{repo}/git/ref/heads/main' --jq .object.sha)" \
+    || die "cannot read main from GitHub"
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "GitHub gave no commit for main: $sha"
+  echo "$sha"
+}
+
+# image_exists <ref> - return success when the registry has this image. Only
+# "not found" about this very image means it doesn't: a missing credential
+# helper also says "not found", and reading any other failure that way could
+# hand a published version to a second image.
+image_exists() {
+  local ref="$1" output
+  if output="$(docker buildx imagetools inspect "$ref" 2>&1)"; then
+    return 0
+  elif [[ "$output" == *"$ref: not found"* ]]; then
+    return 1
+  fi
+  die "cannot inspect $ref: $output"
+}
+
+# first_free_version <repository> <version> - print the version, or the first
+# one after it with no image. The tags only say what was released, so a publish
+# that failed after tagging would otherwise be given the same number by every
+# later run. A minor or a major (patch 0) moves to the next minor, because X.Y
+# only ever takes patches.
+first_free_version() {
+  local repository="$1" version="$2" major minor patch
+  IFS=. read -r major minor patch <<< "${version#v}"
+  while image_exists "${repository}:${major}.${minor}.${patch}"; do
+    echo "${SCRIPT_NAME}: v${major}.${minor}.${patch} has an image but no git tag, so it is skipped" >&2
+    if (( patch == 0 )); then
+      minor=$((minor + 1))
+    else
+      patch=$((patch + 1))
+    fi
+  done
+  echo "v${major}.${minor}.${patch}"
+}
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
-# main <args> - parse arguments and run next-version.py.
+# main <args> - parse arguments, run next-version.py, then check main and the
+# registry.
 main() {
-  local notes="" repo major tag
+  local notes="" only_if_newest=false repo major tag version newest head
 
   # Parse options.
   while [[ $# -gt 0 ]]; do
@@ -112,6 +165,10 @@ main() {
         [[ $# -ge 2 ]] || die "--notes needs a file"
         notes="$2"
         shift 2
+        ;;
+      --only-if-newest)
+        only_if_newest=true
+        shift
         ;;
       -*)
         usage >&2
@@ -157,7 +214,21 @@ main() {
     args+=(--notes "$notes")
   fi
 
-  python3 "$SCRIPT_DIR/next-version.py" "${args[@]}"
+  version="$(python3 "$SCRIPT_DIR/next-version.py" "${args[@]}")"
+  [[ -n "$version" ]] || return 0
+
+  # Asked after the slow image reads, so little time passes before the caller
+  # tags.
+  if [[ "$only_if_newest" == true ]]; then
+    newest="$(newest_on_main)"
+    head="$(git -C "$repo" rev-parse HEAD)"
+    if [[ "$newest" != "$head" ]]; then
+      echo "${SCRIPT_NAME}: main has moved on to ${newest:0:7}, so the next run on main releases this too" >&2
+      return 0
+    fi
+  fi
+
+  first_free_version "$repository" "$version"
 }
 
 main "$@"

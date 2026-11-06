@@ -159,8 +159,9 @@ reach a Docker socket is root on the machine the engine runs on.
 ## Versions
 
 Releases are automatic. Every merge to `main` that changes the image produces
-one, and so does the weekly build when a floating tool or a Debian package has
-moved. The version says how much changed:
+one (merges that land while one is building share the next), and so does the
+weekly build when a floating tool or a Debian package has moved. The version
+says how much changed:
 
 - **Major:** a big refactor of the image, chosen by raising the number in
   [`MAJOR_VERSION`](MAJOR_VERSION).
@@ -202,12 +203,13 @@ of the repository would pass.
    Release`) until a fix is merged. Otherwise the next run, or the weekly one,
    rebuilds with the same newest packages and moves them forward again.
 3. If a release stopped after tagging the image but before the GitHub release
-   exists, use **Re-run failed jobs** on that run within a week: a fresh run
-   refuses to replace the tagged version.
+   exists, nothing is stuck. That version keeps its image with no release, and
+   the next run takes the next number.
 4. Never delete a published image version or its git tag. A missing image
    stops every later release, because each one compares itself with the last.
-   A deleted tag hands its number to the next release, under different
-   contents.
+   A deleted tag makes the next release compare itself with the tag before it,
+   and an image deleted when it has no tag hands its number to the next release,
+   under different contents.
 
 ## Changing it
 
