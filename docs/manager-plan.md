@@ -37,13 +37,21 @@ because the sign-in uses PKCE.
 **That same sign-in is how a browser gets into the page.** The page has no
 accounts or passwords of its own:
 
-- **While the box is signed out,** the first sign-in is the box's own. That
-  browser gets a session, and Remote Control starts.
-- **Once the box is signed in,** a new browser signs in to Claude the same way,
-  but into a throwaway `CLAUDE_CONFIG_DIR`. It gets a session only if that
-  account (email and organisation) is the box's. The throwaway sign-in is then
-  logged out and deleted. The box's own sign-in, and a running Remote Control
-  session, are never touched by a browser signing in.
+- **The box belongs to the account of its first sign-in.** While it has never
+  been signed in, the first sign-in is the box's own: that browser gets a
+  session, and Remote Control starts. The account is recorded as the box's
+  owner (a box already signed in, from the CLI or an older image, is adopted).
+- **After that, only the owner's account gets in.** A new browser signs in to
+  Claude the same way, but into a throwaway `CLAUDE_CONFIG_DIR`. It gets a
+  session only if that account (email and organisation) is the owner's. The
+  throwaway sign-in is then logged out and deleted. The box's own sign-in, and
+  a running Remote Control session, are never touched by a browser signing in.
+- **Signing the box out keeps the owner.** The keys stay on disk, so the next
+  sign-in must be the owner's again; any other account is signed straight back
+  out, and Remote Control refuses to run as it. A status the CLI can't report
+  refuses a sign-in rather than counting as "signed out". To move the box to
+  another account, sign it out, then delete `~/.config/opsbox/manager/owner`
+  from a shell on the box.
 - **A sign-in belongs to the browser that started it.** Only that browser sees
   the link and can finish it, so nobody else on the LAN can finish your first
   setup with their own account.
