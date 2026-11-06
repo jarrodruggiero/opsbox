@@ -172,6 +172,7 @@ class RemoteControl:
                 "last_exit": self.last_exit,
                 "started_at": self.started_at,
                 "pid": pid,
+                "workdir": str(self.workdir),
             }
 
     def _loop(self) -> None:
