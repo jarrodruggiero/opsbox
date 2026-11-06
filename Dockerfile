@@ -29,7 +29,7 @@ FROM docker.io/library/docker:29.9.2-cli@sha256:5e6baf67325a79f64ed3bed6863954d5
 FROM quay.io/cilium/cilium-cli:v0.20.2@sha256:40597ffa6477095c547d24b617d33b5a5e33395e1872c26d9ce8d09feef67d64 AS cilium
 FROM ghcr.io/restic/restic:0.19.1@sha256:2f0373803493361f9304a57150d464677f69a9dad487afec202105aafb2592f2 AS restic
 FROM docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d AS shellcheck
-FROM ghcr.io/jdx/mise:2026.10.25@sha256:91417f41840316b7c5da6854bef393eccea4546ae70f8baf0803e0e94287b68d AS mise
+FROM ghcr.io/jdx/mise:2026.11.3@sha256:60a4852b1632aebb032c94bfbaf8196a1088c091bfd6cfa1ce8f182ab39c7d8e AS mise
 # The terminal on the manager page is xterm.js, vendored here from
 # ui/package-lock.json: npm ci checks every package against the lockfile's
 # hash and runs none of their install scripts. Dependabot keeps the lockfile
