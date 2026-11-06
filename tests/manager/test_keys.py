@@ -1,347 +1,205 @@
-"""Tests for opsbox.manager.keys."""
+"""Tests for the box's SSH key and its free-form settings."""
 from __future__ import annotations
 
 import pathlib
-import textwrap
 
 import pytest
 
 from opsbox.manager import keys
-from opsbox.manager.keys import (
-    KeyError_,
-    describe,
-    describe_all,
-    generate_ssh,
-    get_env,
-    remove_key,
-    set_env,
-    set_key,
-)
+from opsbox.manager.keys import Refused
 
 
-@pytest.fixture
-def fake_gh(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
-    """Write a fake `gh` script and point keys.GH at it."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-
-    script = bin_dir / "gh"
-    script.write_text(
-        textwrap.dedent(
-            f"""\
-            #!/usr/bin/env python3
-            import sys
-            import os
-
-            tmp_path = r"{tmp_path}"
-            gh_ok = os.path.join(tmp_path, "gh-ok")
-
-            args = sys.argv[1:]
-
-            if args == ["auth", "login", "--hostname", "github.com", "--with-token"]:
-                token = sys.stdin.read().strip()
-                if token == "ghp_good" or "SENTINEL-7f3a" in token:
-                    open(gh_ok, "w").close()
-                    sys.exit(0)
-                else:
-                    sys.stderr.write("bad token\\n")
-                    sys.exit(1)
-            elif args == ["auth", "status", "--hostname", "github.com"]:
-                if os.path.exists(gh_ok):
-                    # What gh 2.x really prints.
-                    print("github.com")
-                    print("  \u2713 Logged in to github.com account someone (keyring)")
-                    print("  - Active account: true")
-                    sys.exit(0)
-                else:
-                    sys.exit(1)
-            elif args == ["auth", "logout", "--hostname", "github.com"]:
-                if os.path.exists(gh_ok):
-                    os.unlink(gh_ok)
-                sys.exit(0)
-            else:
-                sys.exit(1)
-            """
-        )
-    )
-    script.chmod(0o755)
-
-    monkeypatch.setattr(keys, "GH", str(script))
-    return bin_dir
+@pytest.fixture(autouse=True)
+def home(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
+    """HOME is a scratch directory, so nothing here touches a real one."""
+    directory = tmp_path / "home"
+    directory.mkdir()
+    monkeypatch.setenv("HOME", str(directory))
+    return directory
 
 
-@pytest.fixture
-def setup_home(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
-    """Set HOME to tmp_path/home and patch home() accordingly."""
-    home_dir = tmp_path / "home"
-    home_dir.mkdir()
-    monkeypatch.setenv("HOME", str(home_dir))
-    # Also patch the module-level home() function
-    import opsbox.manager.keys as keys_module
-
-    monkeypatch.setattr(keys_module, "home", lambda: home_dir)
-    return home_dir
+def env_file(home: pathlib.Path) -> str:
+    return (home / ".config/opsbox/env").read_text()
 
 
-def test_kubeconfig_is_saved_private_and_described(setup_home, fake_gh) -> None:
-    """A minimal valid kubeconfig is saved at mode 0600 under a 0700 directory and described."""
-    kubeconfig = textwrap.dedent(
-        """\
-        apiVersion: v1
-        kind: Config
-        current-context: home
-        contexts:
-        - name: home
-          context:
-            cluster: home-cluster
-            user: opsbox-user
-        clusters:
-        - name: home-cluster
-          cluster:
-            server: https://10.0.0.1:6443
-        - name: other-cluster
-          cluster:
-            server: https://10.9.9.9:6443
-        users:
-        - name: opsbox-user
-          user:
-            token: abc
-        """
-    )
-    set_key("kubernetes", kubeconfig)
-
-    key_path = setup_home / ".kube" / "config"
-    assert key_path.exists()
-    assert key_path.stat().st_mode & 0o777 == 0o600
-    assert (setup_home / ".kube").stat().st_mode & 0o777 == 0o700
-
-    info = describe("kubernetes")
+def test_ssh_key_is_generated_and_only_its_public_half_shows(home: pathlib.Path) -> None:
+    """The private key stays on the box at 0600; what describe returns can't contain it."""
+    assert keys.describe_ssh() == {"set": False}
+    keys.generate_ssh()
+    private = home / ".ssh/id_ed25519"
+    assert private.stat().st_mode & 0o777 == 0o600
+    info = keys.describe_ssh()
     assert info["set"] is True
-    assert info["context"] == "home"
-    assert info["server"] == "https://10.0.0.1:6443"
-    assert info["user"] == "opsbox-user"
-
-
-def test_bad_kubeconfig_is_refused(setup_home, fake_gh) -> None:
-    """'hello: world' raises KeyError_ and nothing is written."""
-    with pytest.raises(KeyError_):
-        set_key("kubernetes", "hello: world")
-    key_path = setup_home / ".kube" / "config"
-    assert not key_path.exists()
-
-
-def test_values_never_come_back(setup_home, fake_gh) -> None:
-    """describe_all() never contains the sentinel string used in every key value."""
-    sentinel = "SENTINEL-7f3a"
-
-    kubeconfig = textwrap.dedent(
-        f"""\
-        apiVersion: v1
-        kind: Config
-        current-context: home
-        contexts:
-        - name: home
-          context:
-            cluster: home-cluster
-            user: opsbox-user
-        clusters:
-        - name: home-cluster
-          cluster:
-            server: https://10.0.0.1:6443
-        users:
-        - name: opsbox-user
-          user:
-            token: {sentinel}
-        """
-    )
-    set_key("kubernetes", kubeconfig)
-
-    talosconfig = textwrap.dedent(
-        f"""\
-        context: home
-        contexts:
-          home:
-            endpoints:
-            - 10.0.0.1
-            ca: {sentinel}
-            crt: {sentinel}
-            key: {sentinel}
-        """
-    )
-    set_key("talos", talosconfig)
-
-    set_key("terraform", sentinel + "x" * 15)
-
-    set_key("local-llm", sentinel + "x" * 15)
-
-    # For github, the fake accepts the sentinel, so we can use it to verify
-    # that describe for github never returns the token value.
-    set_key("github", "ghp_SENTINEL-7f3a")
-
-    text = str(describe_all())
-    assert sentinel not in text
-
-
-def test_github_token_goes_to_gh(setup_home, fake_gh) -> None:
-    """'ghp_good' sets the token and describe shows account 'someone'; 'ghp_bad' raises."""
-    assert describe("github")["set"] is False
-    set_key("github", "ghp_good")
-    info = describe("github")
-    assert info["set"] is True
-    assert info["account"] == "someone"
-
-    with pytest.raises(KeyError_, match="bad token"):
-        set_key("github", "ghp_bad")
-
-
-def test_ssh_is_generated_and_only_public_is_shown(setup_home, fake_gh) -> None:
-    """generate_ssh() creates a private key at mode 0600; describe shows only the public half."""
-    generate_ssh()
-
-    key_path = setup_home / ".ssh" / "id_ed25519"
-    assert key_path.exists()
-    assert key_path.stat().st_mode & 0o777 == 0o600
-
-    info = describe("ssh")
-    assert info["set"] is True
-    assert info["public"].startswith("ssh-ed25519")
-    assert "fingerprint" in info
+    assert info["public"].startswith("ssh-ed25519 ")
+    assert info["fingerprint"].startswith("SHA256:")
     assert "PRIVATE KEY" not in str(info)
-
-    with pytest.raises(KeyError_, match="already an SSH key"):
-        generate_ssh()
+    assert private.read_text().strip().split("\n")[1] not in str(info)
 
 
-def test_ssh_cannot_be_pasted(setup_home, fake_gh) -> None:
-    """set_key('ssh', 'anything') raises KeyError_."""
-    with pytest.raises(KeyError_):
-        set_key("ssh", "anything")
+def test_a_second_key_is_refused_rather_than_replacing_the_first(home: pathlib.Path) -> None:
+    """Replacing the key would silently break everywhere that trusts it."""
+    keys.generate_ssh()
+    first = (home / ".ssh/id_ed25519").read_text()
+    with pytest.raises(Refused, match="already an SSH key"):
+        keys.generate_ssh()
+    assert (home / ".ssh/id_ed25519").read_text() == first
 
 
-def test_remove_key(setup_home, fake_gh) -> None:
-    """After remove_key('kubernetes'), describe says set False and the file is gone."""
-    kubeconfig = textwrap.dedent(
-        """\
-        apiVersion: v1
-        kind: Config
-        current-context: home
-        contexts:
-        - name: home
-          context:
-            cluster: home-cluster
-            user: opsbox-user
-        clusters:
-        - name: home-cluster
-          cluster:
-            server: https://10.0.0.1:6443
-        users:
-        - name: opsbox-user
-          user:
-            token: abc
-        """
-    )
-    set_key("kubernetes", kubeconfig)
-    assert (setup_home / ".kube" / "config").exists()
-
-    remove_key("kubernetes")
-    assert not (setup_home / ".kube" / "config").exists()
-
-    info = describe("kubernetes")
-    assert info["set"] is False
+def test_removing_the_key_removes_both_halves(home: pathlib.Path) -> None:
+    keys.generate_ssh()
+    keys.remove_ssh()
+    assert keys.describe_ssh() == {"set": False}
+    assert not (home / ".ssh/id_ed25519.pub").exists()
 
 
-def test_local_llm_sets_its_env(setup_home, fake_gh) -> None:
-    """After setting the local-llm key, LOCAL_LLM_KEY_FILE is in env; remove_key removes it."""
-    key_value = "a" * 20
-    set_key("local-llm", key_value)
-
-    env = get_env()
-    assert "LOCAL_LLM_KEY_FILE" in env
-    assert env["LOCAL_LLM_KEY_FILE"] == str(setup_home / ".config" / "local-llm" / "key")
-
-    remove_key("local-llm")
-    env = get_env()
-    assert "LOCAL_LLM_KEY_FILE" not in env
+def test_a_missing_keygen_is_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broken image says so on the page, rather than a 500."""
+    monkeypatch.setattr(keys, "SSH_KEYGEN", "/nonexistent/ssh-keygen")
+    with pytest.raises(Refused, match="ssh-keygen"):
+        keys.generate_ssh()
 
 
-def test_env_allowlist(setup_home, fake_gh) -> None:
-    """set_env('TZ', 'Australia/Melbourne') works; disallowed names and bad values raise."""
-    set_env("TZ", "Australia/Melbourne")
-    assert get_env()["TZ"] == "Australia/Melbourne"
-
-    with pytest.raises(KeyError_):
-        set_env("PATH", "/x")
-
-    with pytest.raises(KeyError_, match="claude.ai sign-in"):
-        set_env("ANTHROPIC_API_KEY", "x")
-
-    with pytest.raises(KeyError_):
-        set_env("TZ", "a\nb")
-
-    set_env("TZ", "")
-    assert "TZ" not in get_env()
+def test_any_name_and_value_can_be_set(home: pathlib.Path) -> None:
+    """Settings aren't a fixed list: both the name and the value are the person's."""
+    keys.set_env("MY_SETTING_2", "a value with spaces = and an equals")
+    assert keys.env_rows() == [{"name": "MY_SETTING_2", "hidden": False, "value": "a value with spaces = and an equals"}]
+    assert env_file(home) == "MY_SETTING_2=a value with spaces = and an equals\n"
+    assert (home / ".config/opsbox/env").stat().st_mode & 0o777 == 0o600
 
 
-def test_env_keeps_managed_names(setup_home, fake_gh) -> None:
-    """After setting the LLM key and then TZ, both names are still in the file."""
-    set_key("local-llm", "a" * 20)
-    set_env("TZ", "Australia/Melbourne")
-
-    env = get_env()
-    assert "LOCAL_LLM_KEY_FILE" in env
-    assert "TZ" in env
+def test_saving_again_replaces_and_keeps_the_others(home: pathlib.Path) -> None:
+    keys.set_env("A", "1")
+    keys.set_env("B", "2")
+    keys.set_env("A", "3")
+    assert env_file(home) == "A=3\nB=2\n"
 
 
-def test_refuses_nul_and_huge(setup_home, fake_gh) -> None:
-    """set_key with NUL and with 70000 bytes each raise KeyError_."""
-    with pytest.raises(KeyError_, match="NUL"):
-        set_key("kubernetes", "a\x00b")
-
-    with pytest.raises(KeyError_, match="too long"):
-        set_key("kubernetes", "x" * 70000)
+@pytest.mark.parametrize("name", ["", "1ABC", "A-B", "A B", "A=B", "A\nB", "A\x00", "é", "X" * 129])
+def test_a_name_a_shell_couldnt_use_is_refused(name: str) -> None:
+    """A name is what ends up on the left of an = in the file: anything else could forge a line."""
+    with pytest.raises(Refused, match="letters, digits and underscores"):
+        keys.set_env(name, "value")
 
 
-def test_remove_key_ssh_deletes_pub(setup_home, fake_gh) -> None:
-    """After remove_key('ssh'), both the key and .pub are gone."""
-    generate_ssh()
-    pub_path = setup_home / ".ssh" / "id_ed25519.pub"
-    assert pub_path.exists()
-
-    remove_key("ssh")
-    assert not (setup_home / ".ssh" / "id_ed25519").exists()
-    assert not pub_path.exists()
-
-    info = describe("ssh")
-    assert info["set"] is False
+@pytest.mark.parametrize("name", sorted(keys.ENV_REFUSED))
+def test_what_breaks_remote_control_is_refused_with_why(name: str) -> None:
+    """Free-form stops short of what would silently turn it off or replace its sign-in."""
+    with pytest.raises(Refused) as refused:
+        keys.set_env(name, "x")
+    assert keys.ENV_REFUSED[name] in str(refused.value)
 
 
-def test_talosconfig_is_described(setup_home) -> None:
-    """A talosconfig maps contexts by name: describe gives its context and endpoints."""
-    set_key("talos", "context: home\ncontexts:\n  home:\n    endpoints: [10.0.0.1, 10.0.0.2]\n  other:\n    endpoints: [10.9.9.9]\n")
-    info = describe("talos")
-    assert info["context"] == "home"
-    assert info["endpoints"] == "10.0.0.1, 10.0.0.2"
-    with pytest.raises(KeyError_, match="talosconfig"):
-        set_key("talos", "contexts:\n- name: home\n")
+@pytest.mark.parametrize("value, message", [
+    ("", "Give it a value"),
+    ("   ", "Give it a value"),
+    ("a\nb", "line break"),
+    ("a\rb", "line break"),
+    ("a\x00b", "control character"),
+    ("a\x0cb", "control character"),
+    ("a\x1cb", "control character"),
+    ("a\x85b", "control character"),
+    ("a\u2028b", "control character"),
+    ("x" * 4097, "too long"),
+])
+def test_a_value_the_file_couldnt_hold_is_refused(value: str, message: str) -> None:
+    """Anything one reader takes for a line break would forge another setting, and a NUL would stop Remote Control starting."""
+    with pytest.raises(Refused, match=message):
+        keys.set_env("NAME", value)
 
 
-def test_bad_yaml_and_bad_tokens_are_refused(setup_home) -> None:
-    """Unparseable YAML and wrongly shaped tokens raise KeyError_, never anything else."""
-    with pytest.raises(KeyError_, match="kubeconfig"):
-        set_key("kubernetes", "contexts: [unclosed")
-    with pytest.raises(KeyError_, match="app.terraform.io"):
-        set_key("terraform", "short")
-    with pytest.raises(KeyError_, match="API key"):
-        set_key("local-llm", "has spaces in it, so no")
-    with pytest.raises(KeyError_, match="Unknown"):
-        set_key("nope", "x")
-    with pytest.raises(KeyError_, match="Unknown"):
-        remove_key("nope")
+def test_a_hidden_value_never_comes_back(home: pathlib.Path) -> None:
+    """Ticking Hide keeps the value out of everything the page is given, but not out of the file."""
+    keys.set_env("PLAIN_NAME", "SENTINEL-7f3a", hidden=True)
+    assert "SENTINEL-7f3a" not in str(keys.env_rows())
+    assert keys.env_rows()[0]["hidden"] is True
+    assert "SENTINEL-7f3a" in env_file(home)
 
 
-def test_github_without_gh_reads_as_unset(setup_home, monkeypatch) -> None:
-    """A missing gh binary means GitHub shows as unset, and setting it fails with a KeyError_."""
-    monkeypatch.setattr(keys, "GH", "/nonexistent/gh")
-    assert describe("github")["set"] is False
-    with pytest.raises(KeyError_):
-        set_key("github", "ghp_good")
+@pytest.mark.parametrize("name, value", [
+    ("GH_TOKEN", "x"),
+    ("my_secret", "x"),
+    ("DB_PASSWORD", "x"),
+    ("ANTHROPIC_KEY", "x"),
+    ("OPENAI_API_KEY", "x"),
+    ("DB_PASS", "x"),
+    ("MYSQL_PWD", "x"),
+    ("SOME_JWT", "x"),
+    ("HTTPS_PROXY", "http://user:SENTINEL@proxy:3128"),
+    ("CACHE_URL", "redis://:SENTINEL@cache:6379"),
+    ("REPO_URL", "https://ghp_SENTINEL@github.com/me/repo.git"),
+])
+def test_what_looks_secret_is_hidden_whether_or_not_it_was_ticked(name: str, value: str) -> None:
+    """The box might be forgotten: a token's name, or a password in a URL, hides it anyway."""
+    keys.set_env(name, value)
+    assert keys.env_rows() == [{"name": name, "hidden": True, "value": None}]
+
+
+@pytest.mark.parametrize("name, value", [("GIT_AUTHOR_NAME", "Jarrod"), ("TZ", "Australia/Melbourne"), ("DOCKER_HOST", "ssh://x@y"), ("HTTPS_PROXY", "http://proxy:3128")])
+def test_ordinary_settings_stay_visible(name: str, value: str) -> None:
+    """Over-hiding has a cost too: AUTHOR must not match the "auth" pattern, nor ssh://x@y the password one."""
+    keys.set_env(name, value)
+    assert keys.env_rows() == [{"name": name, "hidden": False, "value": value}]
+
+
+def test_a_hidden_setting_stays_hidden_when_saved_again(home: pathlib.Path) -> None:
+    """A rotated token saved without ticking the box mustn't appear on the page."""
+    keys.set_env("PLAIN", "one", hidden=True)
+    keys.set_env("PLAIN", "SENTINEL-7f3a")
+    assert keys.env_rows() == [{"name": "PLAIN", "hidden": True, "value": None}]
+
+
+def write_env(home: pathlib.Path, text: str) -> None:
+    (home / ".config/opsbox").mkdir(parents=True, exist_ok=True)
+    (home / ".config/opsbox/env").write_text(text)
+
+
+def test_a_file_written_by_hand_or_an_older_version_is_still_hidden(home: pathlib.Path) -> None:
+    """With no hidden list at all, what looks secret must not reach the page."""
+    write_env(home, "GH_TOKEN=SENTINEL-7f3a\nHTTPS_PROXY=http://u:SENTINEL-7f3a@proxy\nTZ=UTC\n")
+    assert "SENTINEL-7f3a" not in str(keys.env_rows())
+    assert {"name": "TZ", "hidden": False, "value": "UTC"} in keys.env_rows()
+
+
+def test_an_unreadable_hidden_list_hides_everything(home: pathlib.Path) -> None:
+    """A corrupt list fails closed, and saving something else doesn't reveal the rest."""
+    keys.set_env("QUIET", "SENTINEL-7f3a", hidden=True)
+    (home / ".config/opsbox/env-hidden.json").write_text("{not json")
+    assert keys.env_rows() == [{"name": "QUIET", "hidden": True, "value": None}]
+    keys.set_env("TZ", "UTC")
+    rows = {row["name"]: row for row in keys.env_rows()}
+    assert rows["QUIET"]["hidden"] is True
+    assert rows["TZ"] == {"name": "TZ", "hidden": False, "value": "UTC"}
+
+
+def test_what_starts_a_process_is_what_the_page_would_allow(home: pathlib.Path) -> None:
+    """The file can be edited by hand: a refused name or a broken line never reaches Remote Control or a shell."""
+    write_env(home, "GOOD=a=b==\nANTHROPIC_API_KEY=x\nHOME=/elsewhere\nbad-name=x\n# a comment\nno equals here\nFORM=a\x0cb\n")
+    assert keys.read_env_file(keys.env_path()) == {"GOOD": "a=b==", "FORM": "a\x0cb"}
+    assert keys.read_env_file(home / "missing") == {}
+
+
+def test_a_file_that_isnt_text_reads_as_what_it_can(home: pathlib.Path) -> None:
+    """A stray byte in the settings mustn't stop Remote Control starting, or the page rendering."""
+    (home / ".config/opsbox").mkdir(parents=True)
+    (home / ".config/opsbox/env").write_bytes(b"GOOD=yes\nBAD=\xff\xfe\n")
+    assert keys.read_env_file(keys.env_path())["GOOD"] == "yes"
+    assert {"name": "GOOD", "hidden": False, "value": "yes"} in keys.env_rows()
+
+
+def test_a_public_key_that_isnt_text_doesnt_break_the_page(home: pathlib.Path) -> None:
+    """Anything can be uploaded to ~/.ssh, and describing it runs on every page load."""
+    (home / ".ssh").mkdir()
+    (home / ".ssh/id_ed25519").write_text("private")
+    (home / ".ssh/id_ed25519.pub").write_bytes(b"\xff\xfe\x00not text")
+    assert keys.describe_ssh()["set"] is True
+
+
+def test_removing_forgets_it_entirely(home: pathlib.Path) -> None:
+    """Removed, and saved again with the same name, it isn't still hidden."""
+    keys.set_env("PLAIN", "one", hidden=True)
+    keys.set_env("OTHER", "two")
+    keys.remove_env("PLAIN")
+    assert env_file(home) == "OTHER=two\n"
+    assert "PLAIN" not in (home / ".config/opsbox/env-hidden.json").read_text()
+    keys.set_env("PLAIN", "three")
+    assert {"name": "PLAIN", "hidden": False, "value": "three"} in keys.env_rows()

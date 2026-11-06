@@ -9,9 +9,40 @@ import time
 from pathlib import Path
 
 from . import claude
+from .keys import read_env_file
 from .ptyproc import PtyProcess
 
-TRUST = re.compile(r"Trust .+\?\s*\[y/N\]")
+# What the page says for each state: never colour alone, always a word and a symbol.
+STATE_LABELS = {
+    "running": ("\u25cf", "Running"),
+    "stopped": ("\u25a0", "Stopped"),
+    "backing-off": ("\u25d0", "Restarting soon"),
+    "asking": ("?", "Waiting for you"),
+    "signed-out": ("\u25cb", "Not signed in"),
+}
+
+# How the CLI ends a yes-or-no question: "Trust …? [y/N] ", "Enable …? (y/n) ".
+YES_OR_NO = re.compile(r"[\[(]y/n[\])]\s*$", re.IGNORECASE)
+
+# The trust check refuses to ask at all in a terminal too small to show the
+# question, so a phone-sized console never shrinks the real one below this.
+MIN_COLS, MIN_ROWS = 80, 24
+
+
+def pending_question(output: str) -> str | None:
+    """The yes-or-no question the output ends on, or None once anything follows it."""
+    lines = claude.strip_ansi(output).rstrip().replace("\r", "\n").split("\n")
+    return lines[-1].strip() if YES_OR_NO.search(lines[-1]) else None
+
+
+def detail_line(rc: dict) -> str:
+    """The line under Remote Control's heading: how it has been doing, or nothing."""
+    parts = []
+    if rc.get("restarts"):
+        parts.append(f"Restarted {rc['restarts']} times")
+    if rc.get("last_exit") is not None:
+        parts.append(f"last exit {rc['last_exit']}")
+    return " \u00b7 ".join(parts)
 
 
 class Console:
@@ -22,6 +53,18 @@ class Console:
         self._keep_bytes = keep_bytes
         self._lock = threading.Lock()
         self._subscribers: list[queue.Queue[bytes | None]] = []
+        self.closed = False
+
+    def close(self) -> None:
+        """End every viewer's stream: this console has no more to show."""
+        with self._lock:
+            self.closed = True
+            for q in self._subscribers:
+                try:
+                    q.put_nowait(None)
+                except queue.Full:
+                    pass
+            self._subscribers = []
 
     def feed(self, data: bytes) -> None:
         """Append data, trim from the front, and push to subscribers."""
@@ -62,41 +105,22 @@ class Console:
         """
         q: queue.Queue[bytes | None] = queue.Queue(maxsize=limit)
         with self._lock:
-            self._subscribers.append(q)
+            if self.closed:
+                q.put_nowait(None)
+            else:
+                self._subscribers.append(q)
             return bytes(self._buffer), q
 
     def subscribed(self, q: queue.Queue[bytes | None]) -> bool:
         """Whether *q* still receives output, or was dropped for falling behind."""
         with self._lock:
-            return q in self._subscribers
+            return q in self._subscribers or self.closed
 
     def unsubscribe(self, q: queue.Queue[bytes | None]) -> None:
         """Remove a subscriber queue if present."""
         with self._lock:
             if q in self._subscribers:
                 self._subscribers.remove(q)
-
-
-def read_env_file(path: Path) -> dict[str, str]:
-    """Parse lines of the form NAME=VALUE from a file.
-
-    Skip blank lines and lines starting with '#'.  Split on the first '='.
-    Return {} if the file is missing.
-    """
-    result: dict[str, str] = {}
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                result[key] = value
-    except FileNotFoundError:
-        pass
-    return result
 
 
 class RemoteControl:
@@ -127,6 +151,8 @@ class RemoteControl:
         self.stable_after = stable_after
 
         self.state: str = "stopped"
+        self.question: str | None = None
+        self._cols, self._rows = 120, 40
         self.restarts: int = 0
         self.last_exit: int | None = None
         self.started_at: float | None = None
@@ -154,6 +180,7 @@ class RemoteControl:
             if self._proc is not None and self._proc.running():
                 self._proc.terminate()
             self.state = "stopped"
+            self.question = None
         self.console.note("stopped")
         self._wake.set()
 
@@ -175,19 +202,45 @@ class RemoteControl:
         self._wake.set()
         return True
 
-    def answer_trust(self) -> bool:
-        """Answer the trust question if the process is asking one.
+    def answer(self, yes: bool, question: str) -> bool:
+        """Answer *question*, if it's the one Remote Control is asking now; False if not.
 
-        Returns True only when the state is "trust-asked" and the process is running,
-        after writing "y\r" to the pty, setting state "running", and noting.
+        Only a person's click or keystroke ever gets here: the manager never
+        answers on its own. The text is what ties a click to what its owner read:
+        a double-click must not answer the next question, unseen. No ends the
+        process, and starting it again would only ask again, so No also stops it.
         """
         with self._lock:
-            if self.state == "trust-asked" and self._proc is not None and self._proc.running():
-                self._proc.write(b"y\r")
-                self.state = "running"
-                self.console.note("trusted the directory")
-                return True
-        return False
+            if self.question is None or self.question != question or self._proc is None or not self._proc.running():
+                return False
+            try:
+                self._proc.write(b"y\r" if yes else b"n\r")
+            except OSError:
+                return False
+            self.state = "running"
+            self.question = None
+        if not yes:
+            self.stop()
+        return True
+
+    def write(self, data: bytes) -> bool:
+        """Type into Remote Control's terminal; False if it isn't running or isn't reading."""
+        with self._lock:
+            proc = self._proc
+        if proc is None or not proc.running():
+            return False
+        try:
+            proc.write(data)
+        except OSError:
+            return False
+        return True
+
+    def resize(self, cols: int, rows: int) -> None:
+        """Size the terminal to the page's, never below what the CLI needs to ask its questions."""
+        with self._lock:
+            self._cols, self._rows = max(cols, MIN_COLS), max(rows, MIN_ROWS)
+            if self._proc is not None:
+                self._proc.resize(self._cols, self._rows)
 
     def status(self) -> dict:
         """Return a snapshot of the current status."""
@@ -200,6 +253,7 @@ class RemoteControl:
                 "started_at": self.started_at,
                 "pid": pid,
                 "workdir": str(self.workdir),
+                "question": self.question,
             }
 
     def _loop(self) -> None:
@@ -215,6 +269,9 @@ class RemoteControl:
             problem = claude.problem(claude.auth_status(claude=self.claude), owner)
             if problem is not None:
                 with self._lock:
+                    # Stop may have been clicked during that check, which takes seconds.
+                    if not self._want:
+                        break
                     self.state = "signed-out"
                 if problem != self._problem:
                     self.console.note(problem)
@@ -225,7 +282,7 @@ class RemoteControl:
 
             # b. Build env and start the process. Stop may have been clicked
             # while the sign-in was being checked, so look again under the lock.
-            env = dict(os.environ)
+            env = {"TERM": "xterm-256color", "COLORTERM": "truecolor", **os.environ}
             env.update(read_env_file(self.env_file))
             with self._lock:
                 if not self._want:
@@ -234,6 +291,8 @@ class RemoteControl:
                     [self.claude or claude.CLAUDE, "remote-control", *self.args],
                     env=env,
                     cwd=self.workdir,
+                    cols=self._cols,
+                    rows=self._rows,
                 )
                 sub_q = self._proc.subscribe()
                 try:
@@ -273,17 +332,23 @@ class RemoteControl:
                 self.console.feed(chunk)
                 window += chunk.decode("utf-8", errors="replace")
                 window = window[-4096:]
+                # No note here, unlike every other state: it would land in the
+                # middle of the prompt the person is about to type at.
+                question = pending_question(window)
                 with self._lock:
-                    if TRUST.search(claude.strip_ansi(window)) and self.state == "running":
-                        self.state = "trust-asked"
-                        self.console.note("asked to trust the directory: answer it on the page")
-                        window = ""
+                    if question != self.question:
+                        self.question = question
+                        if question is not None and self.state == "running":
+                            self.state = "asking"
+                        elif question is None and self.state == "asking":
+                            self.state = "running"
 
             # d. Process exited.
             code = self._proc.wait(5)
             self._proc.unsubscribe(sub_q)
             with self._lock:
                 self.last_exit = code
+                self.question = None
             self.console.note(f"Remote Control exited ({code})")
 
             # e. Decide whether to restart.

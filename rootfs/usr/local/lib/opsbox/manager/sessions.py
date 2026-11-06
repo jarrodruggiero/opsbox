@@ -28,21 +28,29 @@ import time
 from pathlib import Path
 
 
-def _write_private(path: Path, data: str) -> None:
+def _write_private(path: Path, data: str | bytes) -> None:
     """Write *data* to *path* atomically with mode 0600."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     # A name of its own per write (mkstemp makes it 0600), so two writes at
     # once can't rename each other's temporary file away.
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        try:
-            os.write(fd, data.encode())
-        finally:
-            os.close(fd)
+        with os.fdopen(fd, "wb") as file:
+            file.write(data.encode() if isinstance(data, str) else data)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+# How much of a session's hash names it on the page. A prefix of a hash of 256
+# random bits: enough to tell the rows apart, useless as a credential.
+SESSION_ID_LENGTH = 16
+
+
+def session_id(token: str) -> str:
+    """The short id of the session *token* opens."""
+    return _hash(token)[:SESSION_ID_LENGTH]
 
 
 def _hash(token: str) -> str:
@@ -101,18 +109,26 @@ class Sessions:
             data.pop(_hash(token), None)
             self._save(data)
 
+    def revoke_id(self, session_id: str) -> None:
+        """Remove the session a browser row on the page stands for."""
+        with self._lock:
+            data = self._load()
+            for hashed in [h for h in data if h[:SESSION_ID_LENGTH] == session_id]:
+                del data[hashed]
+            self._save(data)
+
     def revoke_all(self) -> None:
         """Remove all sessions."""
         with self._lock:
             self._save({})
 
     def list(self) -> list[dict]:
-        """Return session info sorted by creation time. Never includes hashes."""
+        """Return session info sorted by creation time, with a short id that can't be used as a session."""
         with self._lock:
             data = self._load()
         return sorted(
-            [{"label": v["label"], "created": v["created"], "expires": v["expires"]}
-             for v in data.values()],
+            [{"id": h[:SESSION_ID_LENGTH], "label": v["label"], "created": v["created"], "expires": v["expires"]}
+             for h, v in data.items()],
             key=lambda e: e["created"],
         )
 

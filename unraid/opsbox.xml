@@ -15,8 +15,9 @@
      (stops a setuid binary from raising privileges), hostname opsbox (fixed
      session name across updates), restart=unless-stopped (see point 4).
   3. After the first start, open the WebUI (the manager page, port 8080 on
-     the container's br0 address) to sign in to Claude and answer the trust
-     question. It is plain HTTP: keep br0's address off the internet.
+     the container's br0 address) to sign in to Claude and answer its
+     first-start questions. It is plain HTTP: keep br0's address off the
+     internet.
 
   4. Restart policy: dockerMan sets no restart policy by default. The
      manager restarts Remote Control itself; the policy restarts the manager.
@@ -43,7 +44,7 @@
   <Category>Tools: Productivity:</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/jarrodruggiero/opsbox/main/unraid/opsbox.xml</TemplateURL>
-  <Icon/>
+  <Icon>https://raw.githubusercontent.com/jarrodruggiero/opsbox/main/assets/icon.png</Icon>
   <ExtraParams>--user 1000:1000 --read-only --tmpfs /tmp --tmpfs /var/tmp --cap-drop ALL --security-opt no-new-privileges --hostname opsbox --restart=unless-stopped</ExtraParams>
   <PostArgs/>
   <DonateText/>

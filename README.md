@@ -1,3 +1,5 @@
+<img src="assets/icon.png" alt="" width="64" align="right">
+
 # opsbox
 
 A container image that runs [Claude Code Remote
@@ -32,36 +34,43 @@ are private to it.
 open the manager page at `http://<the box's address>:8080/`:
 
 1. **Sign in to Claude.** The page gives you a claude.ai link: sign in there,
-   2FA included, and paste the code claude.ai shows into the page. Remote
-   Control needs a claude.ai sign-in on a Pro, Max, Ultra, Team or Enterprise
-   plan; a `claude setup-token` token or an API key can't start it.
-2. **Trust the workspace.** On its first start Remote Control asks whether to
-   trust `~/workspace`, and the page shows the question with a Trust button.
+   2FA included, and paste the code claude.ai shows into the page. Pasting it is
+   the last step. Remote Control needs a claude.ai sign-in on a Pro, Max, Ultra,
+   Team or Enterprise plan; a `claude setup-token` token or an API key can't
+   start it.
+2. **Answer its first-start questions.** Remote Control asks to trust
+   `~/workspace` and to enable itself, once each. The page shows each one with
+   Yes and No, or type the answer in the console.
 
 The box then shows up under Remote Control in the Claude app and at
-claude.ai/code, and new sessions start in `~/workspace`. The page also shows
-Remote Control's output live, starts, stops and restarts it, and sets the box's
-keys and settings. **Keys are write-only:** the page shows what each one
-authenticates as, never the key itself.
+claude.ai/code, and new sessions start in `~/workspace`.
 
 If the network drops for more than about 10 minutes, `claude remote-control`
 exits, and the manager starts it again.
+
+**The console** on the page is real. Its Remote Control tab is that process's own
+terminal, and its Shell tab is `bash` on the box as `opsbox`, in `~/workspace`.
+Each browser gets its own shell, which survives a reload, and closes after 12
+hours with nobody viewing it and nothing running in it. What a shell prints stays
+out of `docker logs`.
 
 **Who can use the page.** It has no accounts of its own: a browser gets in by
 signing in to Claude as the box's account. The box belongs to the account of
 its first sign-in, so finish setup promptly; after that, any other account is
 refused, even after you sign the box out. To move the box to another account,
 sign it out, then delete `~/.config/opsbox/manager/owner` from a shell on the
-box (`docker exec opsbox rm ~/.config/opsbox/manager/owner`). The page is plain
-HTTP, so the sign-in code and the browser's session cross the network
-unencrypted: fine on a trusted LAN; anywhere else, put HTTPS in front of it and
-limit who can reach port 8080. It answers only to IP addresses and to the names
-in `OPSBOX_MANAGER_HOSTS` (comma-separated), which stops DNS rebinding.
+box (`docker exec opsbox rm ~/.config/opsbox/manager/owner`).
+
+**A signed-in browser is the box's own user:** it can open a shell and read every
+key. The page is plain HTTP, so the sign-in code and the browser's session cross
+the network unencrypted: fine on a trusted LAN; anywhere else, put HTTPS in front
+of it and limit who can reach port 8080. It answers only to IP addresses and to
+the names in `OPSBOX_MANAGER_HOSTS` (comma-separated), which stops DNS rebinding.
 
 **Without the page:** set the container's command to `remote-control --spawn
 same-dir`, as before the manager. Then sign in with `docker exec -it opsbox
-claude auth login`, and answer the trust question with `docker attach opsbox`
-(it needs `tty` and `stdin_open`), detaching with Ctrl-P Ctrl-Q.
+claude auth login`, and answer its questions with `docker attach opsbox` (it
+needs `tty` and `stdin_open`), detaching with Ctrl-P Ctrl-Q.
 
 **Trusting `~/workspace` trusts everything under it.** Claude Code carries a
 directory's trust down to every directory inside it, so a repository cloned
@@ -81,15 +90,23 @@ firewall rules can name it. Never map the Docker socket.
 ### Your keys
 
 Everything personal lives in the volume at `/home/opsbox`, and none of it is
-in the image. The manager page sets most of these:
+in the image. The manager page puts things there three ways:
 
-- **Claude Code:** `~/.claude`, `~/.claude.json`
-- **SSH:** `~/.ssh`
-- **kubectl:** `~/.kube/config`
-- **talosctl:** `~/.talos/config`
-- **gh:** `~/.config/gh`, set up with `gh auth login`
-- **Terraform:** `~/.terraform.d/credentials.tfrc.json`
-- **Repositories:** clone them into `~/workspace` (see the trust note above)
+- **Config files:** choose a file and say where it goes, under `~`. A kubeconfig
+  goes to `~/.kube/config`, a talosconfig to `~/.talos/config`, gh's to
+  `~/.config/gh/hosts.yml`, Terraform's to
+  `~/.terraform.d/credentials.tfrc.json`. Files are private to the box's user,
+  up to 1 MiB, and the page shows only their path, size and date.
+- **Environment:** any name and value, applied the next time Remote Control or a
+  shell starts. Hide a value and it's never sent to a browser again (names that
+  look secret, like `GH_TOKEN`, hide themselves, and a hidden one stays hidden
+  until you remove it). The few that would turn Remote Control off or replace its
+  sign-in are refused with the reason.
+- **SSH key:** generated on the box, with only its public half shown.
+
+Claude Code keeps its own sign-in and settings in `~/.claude` and
+`~/.claude.json`. Clone repositories into `~/workspace` (see the trust note
+above).
 
 The volume must be owned by uid 1000: `mkdir -m 0700 home && sudo chown
 1000:1000 home`. On every start the entrypoint takes away other users' access

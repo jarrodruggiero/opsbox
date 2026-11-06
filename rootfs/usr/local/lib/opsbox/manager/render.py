@@ -1,396 +1,328 @@
 """Build the manager's one HTML page from a context dict.
 
-The page is plain HTML forms, which work without JavaScript; manager.js only
-adds the live terminal, Copy buttons and a refresh when the state changes.
-Replace and the destructive confirms are <details>, so they need no script
-and no second route. The Content-Security-Policy allows no inline script or
-style, so there are no style= or on…= attributes here.
+The page is plain HTML forms, which work without JavaScript; manager.js adds the
+terminals, keeps the state current without reloading, and asks before anything
+destructive. The Content-Security-Policy allows no inline script or style, so
+there are no style= or on…= attributes here.
 
 The house rules, from Stocktake: one line at a control and nothing for what
 people already understand; every action is a button; one primary per form,
 danger for what destroys something, and a confirm that says what survives;
 status always has a word and a symbol, never colour alone.
 
-Every value from the context goes through e(). Without a session the page
-says nothing about the box beyond whether it's signed in, and it never shows a
-key's value, only what the key authenticates as.
+Every value from the context goes through e(). Without a session the page says
+nothing about the box beyond whether it's signed in. It never shows a hidden
+setting's value or a file's contents.
 """
 from __future__ import annotations
 
 import html
 import time
 
+from .supervisor import STATE_LABELS, detail_line
+
+# The mark: an isometric cube on the suite's 24 grid, stroked at 2 with round
+# joins, and exactly one element in the accent, as Stocktake's and the rest are.
+MARK_PATHS = (
+    '<path d="M3.77 7.25v9.5L12 21.5l8.23-4.75v-9.5"/><path d="M12 12v9.5"/>'
+    '<path class="top" d="M12 2.5l8.23 4.75L12 12 3.77 7.25z"/>'
+)
+MARK = (
+    '<svg class="mark" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"'
+    f' stroke-linejoin="round" aria-hidden="true">{MARK_PATHS}</svg>'
+)
+
+# Which of Remote Control's buttons make sense in each state. manager.js applies
+# the same list as the state changes.
+ACTION_STATES = {
+    "start": ("stopped",),
+    "stop": ("running", "asking", "backing-off", "signed-out"),
+    "restart": ("running", "asking", "backing-off"),
+}
+
+
 def e(value: object) -> str:
     """Escape a value for HTML text or a quoted attribute."""
     return html.escape(str(value), quote=True)
 
 
-# What each key's detail line shows, in order, from describe()'s fields.
-DETAIL_FIELDS = {
-    "kubernetes": ("context", "server", "user"),
-    "talos": ("context", "endpoints"),
-    "github": ("account",),
-    "terraform": ("host",),
-    "ssh": ("fingerprint",),
-}
-
-
-def csrf_field(ctx: dict) -> str:
-    """The hidden field every form carries."""
-    return '<input type="hidden" name="csrf" value="' + e(ctx["csrf"]) + '">'
-
-
-def _badge(state: str) -> str:
-    """Remote Control's state as a symbol and a word."""
-    mapping = {
-        "running": ("●", "Running"),
-        "stopped": ("■", "Stopped"),
-        "backing-off": ("◐", "Restarting soon"),
-        "trust-asked": ("?", "Waiting for you"),
-        "signed-out": ("○", "Not signed in"),
-    }
-    sym, word = mapping.get(state, ("?", "Unknown"))
-    return '<span class="badge state-' + e(state) + '">' + sym + " " + e(word) + "</span>"
-
-
-def _pagehead(ctx: dict) -> str:
-    """The title, and with a session the box's account and Remote Control's state."""
-    session = ctx["session"]
-    box = ctx["box"]
-    rc = ctx["rc"] if session else {}
-
-    parts = ['<header class="pagehead">']
-    parts.append("<h1>opsbox</h1>")
-
-    if session:
-        known = [e(box[name]) for name in ("email", "orgName", "subscriptionType") if box.get(name)]
-        who = " \u00b7 ".join(known) if box.get("loggedIn") and known else "Not signed in to Claude"
-        parts.append('<p class="who">' + who + "</p>")
-
-    if session and rc:
-        state = rc.get("state", "")
-        parts.append(_badge(state))
-
-    parts.append("</header>")
-    return "\n".join(parts)
-
-
-def _flash_and_error(ctx: dict) -> str:
-    """What the last action did, or why it was refused."""
-    parts = []
-    if ctx.get("flash"):
-        parts.append('<p class="flash" role="status">' + e(ctx["flash"]) + "</p>")
-    if ctx.get("error"):
-        parts.append('<p class="error" role="alert">' + e(ctx["error"]) + "</p>")
-    return "\n".join(parts)
-
-
-def _signin_section(ctx: dict) -> str:
-    """The only section without a session: start, finish or cancel signing in to Claude."""
-    box = ctx["box"]
-    login = ctx["login"]
-    parts = ['<section class="card signin">']
-    parts.append("<h2>Sign in to Claude</h2>")
-
-    if login["active"] and login["mine"]:
-        url = login.get("url")
-        if url and (url.startswith("https://claude.com/") or url.startswith("https://claude.ai/")):
-            parts.append('<a class="button primary" href="' + e(url) + '" target="_blank" rel="noopener noreferrer">Open claude.ai</a>')
-        else:
-            parts.append('<p class="error" role="alert">Claude gave an unexpected sign-in link. Cancel and try again.</p>')
-
-        parts.append('<form method="post" action="/signin/code">' + csrf_field(ctx))
-        parts.append('<label for="code">Code from claude.ai</label>')
-        parts.append('<input id="code" name="code" autocomplete="one-time-code" required>')
-        parts.append('<button class="primary">Finish signing in</button>')
-        parts.append("</form>")
-
-        parts.append('<form method="post" action="/signin/cancel">' + csrf_field(ctx))
-        parts.append('<button class="secondary">Cancel</button>')
-        parts.append("</form>")
-
-    elif login["active"] and not login["mine"]:
-        parts.append('<p>Another browser is signing in. Starting here cancels it.</p>')
-        parts.append('<form method="post" action="/signin/start">' + csrf_field(ctx))
-        parts.append('<button class="primary">Sign in here</button>')
-        parts.append("</form>")
-
+def browser_name(user_agent: str) -> str:
+    """A User-Agent as a person would say it: "Chrome on Windows"."""
+    for token, name in (("Edg/", "Edge"), ("OPR/", "Opera"), ("Firefox/", "Firefox"), ("Chrome/", "Chrome"), ("Safari/", "Safari")):
+        if token in user_agent:
+            browser = name
+            break
     else:
-        if box.get("loggedIn") or box.get("owned"):
-            parts.append('<p>Sign in with the Claude account this box uses.</p>')
+        browser = "A browser"
+    for token, name in (("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"), ("Windows", "Windows"), ("Mac OS X", "macOS"), ("Linux", "Linux")):
+        if token in user_agent:
+            return f"{browser} on {name}"
+    return browser
+
+
+def size_text(size: int) -> str:
+    """A file's size for a person to read."""
+    if size < 1024:
+        return f"{size} B"
+    if size < 1048576:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / 1048576:.1f} MB"
+
+
+def date_text(when: float) -> str:
+    """A date for a person to read: 6 Nov 2026."""
+    local = time.localtime(when)
+    return f"{local.tm_mday} {time.strftime('%b %Y', local)}"
+
+
+def _field(value: str, name: str = "csrf") -> str:
+    """A hidden form field."""
+    return f'<input type="hidden" name="{e(name)}" value="{e(value)}">'
+
+
+def _form(ctx: dict, action: str, label: str, *, css: str = "secondary", confirm: str | None = None,
+          fields: dict[str, str] | None = None, fetch: bool = False, attrs: str = "") -> str:
+    """A form that's only a button: every action on the page that takes no typing."""
+    extra = "".join(_field(value, name) for name, value in (fields or {}).items())
+    asks = f' data-confirm="{e(confirm)}"' if confirm else ""
+    live = " data-fetch" if fetch else ""
+    return (
+        f'<form method="post" action="{e(action)}"{asks}{live}{attrs}>{_field(ctx["csrf"])}{extra}'
+        f'<button class="{css}">{e(label)}</button></form>'
+    )
+
+
+def _status(rc: dict) -> str:
+    """Remote Control's state as a symbol and a word."""
+    state = rc.get("state", "")
+    symbol, word = STATE_LABELS.get(state, ("?", "Unknown"))
+    return (
+        f'<span id="rc-status" class="status state-{e(state)}">'
+        f'<span class="symbol" aria-hidden="true">{symbol}</span><span class="word">{e(word)}</span></span>'
+    )
+
+
+def _topbar(ctx: dict) -> str:
+    """The bar along the top: the name, Remote Control's state and who the box is signed in as."""
+    email = ctx["box"].get("email")
+    who = f'<span class="who">{e(email)}</span>' if email else ""
+    return (
+        f'<header class="topbar"><a class="brand" href="/">{MARK}<span>opsbox</span></a>'
+        f'<span class="spacer"></span>{who}{_status(ctx["rc"])}</header>'
+    )
+
+
+def _notices(ctx: dict) -> str:
+    """What the last action did, or why it was refused."""
+    parts = ['<div id="notice" class="notice" role="status" hidden></div>']
+    if ctx.get("flash"):
+        parts = [f'<div id="notice" class="notice" role="status" data-fades>{e(ctx["flash"])}</div>']
+    if ctx.get("error"):
+        parts.append(f'<div class="notice bad" role="alert">{e(ctx["error"])}</div>')
+    return "".join(parts)
+
+
+def _signin(ctx: dict) -> str:
+    """Start, finish or cancel signing in to Claude: the whole page without a session."""
+    login = ctx["login"]
+    box = ctx["box"]
+    token = ctx["presession"]
+    heading = "<h1>Sign in to Claude</h1>" if not ctx["session"] else "<h2>Sign in to Claude</h2>"
+    parts = [f'<section class="panel signin">{heading}']
+    if login["active"] and login["mine"]:
+        url = login.get("url") or ""
+        if url.startswith(("https://claude.com/", "https://claude.ai/")):
+            opener = f'<a class="button secondary" href="{e(url)}" target="_blank" rel="noopener noreferrer">Open claude.ai</a>'
         else:
-            parts.append('<p>Sign in to set up this box.</p>')
-        parts.append('<form method="post" action="/signin/start">' + csrf_field(ctx))
-        parts.append('<button class="primary">Sign in to Claude</button>')
-        parts.append("</form>")
-
+            opener = '<p class="notice bad" role="alert">Claude gave an unexpected sign-in link. Cancel and try again.</p>'
+        parts.append(
+            f'<ol class="steps"><li>{opener}</li><li>'
+            f'<form method="post" action="/signin/code" id="code-form">{_field(token)}'
+            '<label for="code">Code from claude.ai</label>'
+            '<input id="code" name="code" autocomplete="one-time-code" spellcheck="false" autocapitalize="none" required autofocus>'
+            '<div class="formactions"><button class="primary">Finish signing in</button></div></form></li></ol>'
+            f'<form method="post" action="/signin/cancel" class="aside">{_field(token)}<button class="text">Cancel</button></form>'
+        )
+    elif login["active"]:
+        parts.append(
+            '<p class="sub">Another browser is signing in. Starting here cancels it.</p>'
+            f'<form method="post" action="/signin/start">{_field(token)}<div class="formactions"><button class="primary">Sign in here</button></div></form>'
+        )
+    else:
+        line = "Sign in with the Claude account this box uses." if box.get("loggedIn") or box.get("owned") else "Sign in to set up this box."
+        parts.append(
+            f'<p class="sub">{line}</p>'
+            f'<form method="post" action="/signin/start">{_field(token)}<div class="formactions"><button class="primary">Sign in to Claude</button></div></form>'
+        )
     parts.append("</section>")
-    return "\n".join(parts)
+    return "".join(parts)
 
 
-def _remote_control(ctx: dict) -> str:
-    """Start, stop and restart, and the trust question when it's asked."""
+def _console(ctx: dict) -> str:
+    """Remote Control's buttons and any question it's asking, and the terminals manager.js puts here."""
     rc = ctx["rc"]
     state = rc.get("state", "")
-    restarts = rc.get("restarts", 0)
-    last_exit = rc.get("last_exit")
-
-    parts = ['<section class="card" id="remote-control"><h2>Remote Control</h2>']
-
-    if restarts and restarts > 0:
-        line = "Restarted " + e(str(restarts)) + " times"
-        if last_exit is not None:
-            line += " \u00b7 last exit " + e(str(last_exit))
-        parts.append("<p>" + line + "</p>")
-
-    parts.append('<div class="headactions">')
-
-    start_class = "primary" if state in ("stopped", "signed-out") else "secondary"
-    parts.append('<form method="post" action="/rc/start">' + csrf_field(ctx))
-    parts.append('<button class="' + start_class + '">Start</button>')
-    parts.append("</form>")
-
-    parts.append('<form method="post" action="/rc/stop">' + csrf_field(ctx))
-    parts.append('<button class="secondary">Stop</button>')
-    parts.append("</form>")
-
-    parts.append('<form method="post" action="/rc/restart">' + csrf_field(ctx))
-    parts.append('<button class="secondary">Restart</button>')
-    parts.append("</form>")
-
-    parts.append("</div>")
-
-    if state == "trust-asked":
-        parts.append('<div class="callout">')
-        parts.append("<p>Remote Control asks to trust " + e(rc.get("workdir") or "its working directory") + ". Everything under it runs with this box's keys.</p>")
-        parts.append('<form method="post" action="/rc/trust">' + csrf_field(ctx))
-        parts.append('<button class="primary">Trust</button>')
-        parts.append("</form>")
-        parts.append("</div>")
-
-    parts.append("</section>")
-    return "\n".join(parts)
+    actions = []
+    for name, label, css in (("start", "Start", "primary"), ("stop", "Stop", "secondary"), ("restart", "Restart", "secondary")):
+        states = ACTION_STATES[name]
+        hidden = "" if state in states else " hidden"
+        actions.append(_form(ctx, f"/rc/{name}", label, css=css, fetch=True, attrs=f' data-show="{" ".join(states)}"{hidden}'))
+    question = rc.get("question")
+    return (
+        '<section class="panel" id="console"><div class="panelhead"><div class="headgroup"><h2>Console</h2>'
+        '<div class="tabs" role="tablist" aria-label="Console">'
+        '<button type="button" role="tab" class="tab" id="tab-rc" aria-selected="true" aria-controls="pane-rc">Remote Control</button>'
+        '<button type="button" role="tab" class="tab" id="tab-shell" aria-selected="false" aria-controls="pane-shell">Shell</button>'
+        f'</div><p class="sub" id="rc-detail">{e(detail_line(rc))}</p></div>'
+        f'<div class="actions" id="rc-actions">{"".join(actions)}</div></div>'
+        f'<div class="callout" id="rc-question"{"" if question else " hidden"}>'
+        f'<p id="rc-question-text">{e(question or "")}</p><div class="actions">'
+        f'{_form(ctx, "/rc/answer", "Yes", css="primary", fetch=True, fields={"answer": "yes", "question": question or ""})}'
+        f'{_form(ctx, "/rc/answer", "No", fetch=True, fields={"answer": "no", "question": question or ""})}'
+        '</div></div><div class="termframe">'
+        '<div class="terminal" id="pane-rc" role="tabpanel" aria-labelledby="tab-rc"></div>'
+        '<div class="terminal" id="pane-shell" role="tabpanel" aria-labelledby="tab-shell" hidden></div>'
+        '</div><noscript><p class="sub">The console needs JavaScript.</p></noscript></section>'
+    )
 
 
-def _console_section(_ctx: dict) -> str:
-    """Where manager.js puts the live terminal."""
-    parts = ['<section class="card" id="console"><h2>Console</h2>']
-    parts.append('<div id="terminal" class="terminal" aria-label="Remote Control console"></div>')
-    parts.append('<noscript><p>The live console needs JavaScript.</p></noscript>')
-    parts.append("</section>")
-    return "\n".join(parts)
+def _files(ctx: dict) -> str:
+    """The config files uploaded to the box, and the form to upload another."""
+    rows = "".join(
+        f'<li class="row"><div class="rowmain"><div class="rowname">{e(f["path"])}</div>'
+        f'<div class="rowmeta">{e(size_text(f["size"]))} · {e(date_text(f["uploaded"]))}</div></div>'
+        f'<div class="actions"><button type="button" class="secondary small" data-replace="{e(f["path"])}">Replace</button>'
+        f'{_form(ctx, "/files/remove", "Remove", css="danger small", fields={"path": f["path"]}, confirm=f"Remove {f["path"]}? The other files are kept.")}'
+        "</div></li>"
+        for f in ctx["files"]
+    )
+    listing = f'<ul class="rows">{rows}</ul>' if rows else '<p class="empty">No files yet.</p>'
+    return (
+        '<section class="panel" id="files"><div class="panelhead"><h2>Config files</h2></div>'
+        f'{listing}<form class="stacked" id="upload-form" method="post" action="/files" enctype="multipart/form-data">{_field(ctx["csrf"])}'
+        '<div class="field"><label for="file-input">File</label><input id="file-input" type="file" name="file" required></div>'
+        '<div class="field"><label for="file-path">Path on the box</label>'
+        '<input id="file-path" name="path" placeholder="~/.kube/config" spellcheck="false" autocapitalize="none" autocomplete="off" required></div>'
+        '<div class="formactions"><button class="primary">Upload</button></div></form></section>'
+    )
 
 
-def _keys_section(ctx: dict) -> str:
-    """Each key: whether it's set, what it authenticates as, and Replace or Remove."""
-    keys = ctx["keys"]
-    parts = ['<section class="card" id="keys"><h2>Keys</h2>']
-    parts.append('<ul class="keys">')
-
-    for k in keys:
-        label = k.get("label", "")
-        key_id = k.get("id", "")
-        is_set = k.get("set", False)
-        hint = k.get("hint", "")
-
-        parts.append('<li class="key">')
-        parts.append('<div class="keyhead">')
-        parts.append("<strong>" + e(label) + "</strong>")
-        parts.append('<span class="badge ' + ("set" if is_set else "unset") + '">' + ("\u2713 Set" if is_set else "\u2013 Not set") + "</span>")
-        parts.append("</div>")
-
-        if "problem" in k:
-            detail = "Can't read it: replace it."
-        else:
-            detail = " \u00b7 ".join(e(k[name]) for name in DETAIL_FIELDS.get(key_id, ()) if k.get(name))
-        if detail:
-            parts.append('<p class="detail">' + detail + "</p>")
-
-        if not is_set and hint:
-            parts.append('<p class="hint">' + e(hint) + "</p>")
-
-        parts.append('<div class="keyactions">')
-
-        if key_id == "ssh" and not is_set:
-            parts.append('<form method="post" action="/keys/ssh/generate">' + csrf_field(ctx))
-            parts.append('<button class="secondary small">Generate</button>')
-            parts.append("</form>")
-
-        if key_id == "ssh" and is_set and k.get("public"):
-            parts.append('<button type="button" class="secondary small" data-copy="' + e(k["public"]) + '">Copy public key</button>')
-
-        if key_id != "ssh":
-            action_label = "Replace" if is_set else "Add"
-            parts.append('<details class="replace">')
-            parts.append('<summary class="button secondary small">' + e(action_label) + "</summary>")
-            parts.append('<form method="post" action="/keys/' + e(key_id) + '">' + csrf_field(ctx))
-            parts.append('<label for="value-' + e(key_id) + '">' + e(label) + "</label>")
-            parts.append('<textarea id="value-' + e(key_id) + '" name="value" rows="6" required autocomplete="off" spellcheck="false"></textarea>')
-            parts.append('<button class="primary">Save</button>')
-            parts.append("</form>")
-            parts.append("</details>")
-
-        if is_set:
-            parts.append('<details class="confirm">')
-            parts.append('<summary class="button danger small">Remove</summary>')
-            parts.append('<p>Remove the ' + e(label) + ' key? The other keys are kept.</p>')
-            parts.append('<form method="post" action="/keys/' + e(key_id) + '/remove">' + csrf_field(ctx))
-            parts.append('<button class="danger">Remove</button>')
-            parts.append("</form>")
-            parts.append("</details>")
-
-        parts.append("</div>")
-        parts.append("</li>")
-
-    parts.append("</ul>")
-    parts.append("</section>")
-    return "\n".join(parts)
+def _environment(ctx: dict) -> str:
+    """The settings Remote Control and shells start with, and the form to set one."""
+    rows = "".join(
+        f'<li class="row"><div class="rowmain"><div class="rowname">{e(row["name"])}</div>'
+        + (
+            '<div class="rowmeta">Hidden</div>' if row["hidden"]
+            else f'<div class="rowmeta value">{e(row["value"])}</div>'
+        )
+        + f'</div><div class="actions">{_form(ctx, "/env/remove", "Remove", css="danger small", fields={"name": row["name"]}, confirm=f"Remove {row["name"]}? The other settings are kept.")}'
+        "</div></li>"
+        for row in ctx["env"]
+    )
+    listing = f'<ul class="rows">{rows}</ul>' if rows else '<p class="empty">No settings yet.</p>'
+    return (
+        '<section class="panel" id="environment"><div class="panelhead"><div><h2>Environment</h2>'
+        '<p class="sub">Restart Remote Control to apply.</p></div></div>'
+        f'{listing}<form class="stacked" method="post" action="/env" id="env-form">{_field(ctx["csrf"])}'
+        '<div class="fieldrow"><div class="field"><label for="env-name">Name</label>'
+        '<input id="env-name" name="name" placeholder="DOCKER_HOST" spellcheck="false" autocapitalize="none" autocomplete="off" required></div>'
+        '<div class="field"><label for="env-value">Value</label>'
+        '<input id="env-value" name="value" spellcheck="false" autocapitalize="none" autocomplete="off" required></div></div>'
+        '<div class="formactions spread"><label class="check"><input id="env-hidden" type="checkbox" name="hidden" value="1"> Hide the value</label>'
+        '<button class="primary">Save</button></div></form></section>'
+    )
 
 
-def _environment_section(ctx: dict) -> str:
-    """The settings Remote Control starts with: each one's value, Remove, and a form to set one."""
-    env = ctx["env"]
-    env_allowed = ctx["env_allowed"]
-    parts = ['<section class="card" id="environment"><h2>Environment</h2>']
-    if env:
-        parts.append('<table class="env">')
-        parts.append("<thead><tr><th>Name</th><th>Value</th><th></th></tr></thead>")
-        parts.append("<tbody>")
-
-        for name, value in env.items():
-            purpose = env_allowed.get(name, "")
-            parts.append("<tr>")
-            parts.append("<td>" + e(name))
-            if purpose:
-                parts.append("<small>" + e(purpose) + "</small>")
-            parts.append("</td>")
-            parts.append("<td>" + e(value) + "</td>")
-            parts.append("<td>")
-            parts.append('<form method="post" action="/env">' + csrf_field(ctx))
-            parts.append('<input type="hidden" name="name" value="' + e(name) + '">')
-            parts.append('<input type="hidden" name="value" value="">')
-            parts.append('<button class="secondary small">Remove</button>')
-            parts.append("</form>")
-            parts.append("</td>")
-            parts.append("</tr>")
-
-        parts.append("</tbody></table>")
-
-    parts.append('<form method="post" action="/env">' + csrf_field(ctx))
-    parts.append('<label for="env-name">Setting</label>')
-    parts.append('<select id="env-name" name="name">')
-    for name in env_allowed:
-        parts.append('<option value="' + e(name) + '">' + e(name) + "</option>")
-    parts.append("</select>")
-    parts.append('<label for="env-value">Value</label>')
-    parts.append('<input id="env-value" name="value" required>')
-    parts.append('<button class="primary">Save</button>')
-    parts.append("</form>")
-
-    parts.append('<p>Restart Remote Control to apply.</p>')
-    parts.append("</section>")
-    return "\n".join(parts)
+def _ssh(ctx: dict) -> str:
+    """The box's SSH key: generate it here, and copy its public half to where it's needed."""
+    ssh = ctx["ssh"]
+    if not ssh.get("set"):
+        return (
+            '<section class="panel" id="ssh"><div class="panelhead"><h2>SSH key</h2>'
+            f'<div class="actions">{_form(ctx, "/ssh/generate", "Generate", css="primary small")}</div></div>'
+            '<p class="empty">No key yet.</p></section>'
+        )
+    public = ssh.get("public", "")
+    copy = f'<button type="button" class="secondary small" data-copy="{e(public)}">Copy public key</button>' if public else ""
+    fingerprint = f'<div class="rowmeta value">{e(ssh["fingerprint"])}</div>' if ssh.get("fingerprint") else ""
+    shown = f'<code class="block">{e(public)}</code>' if public else ""
+    return (
+        '<section class="panel" id="ssh"><div class="panelhead"><h2>SSH key</h2><div class="actions">'
+        f'{copy}{_form(ctx, "/ssh/remove", "Remove", css="danger small", confirm="Remove the SSH key? Anywhere that trusts it needs the new public key after this.")}'
+        f"</div></div>{shown}{fingerprint}</section>"
+    )
 
 
-def _browsers_section(ctx: dict) -> str:
-    """The browsers with a session, and signing out this one or all of them."""
-    browsers = ctx["browsers"]
-    parts = ['<section class="card" id="browsers"><h2>Browsers</h2>']
-    parts.append("<ul>")
-
-    for b in browsers:
-        label = b.get("label", "")
-        created = b.get("created", 0)
-        created_str = time.strftime("%Y-%m-%d", time.gmtime(created))
-        parts.append("<li>" + e(label) + " signed in " + e(created_str) + "</li>")
-
-    parts.append("</ul>")
-
-    parts.append('<form method="post" action="/browsers/signout">' + csrf_field(ctx))
-    parts.append('<button class="secondary">Sign out this browser</button>')
-    parts.append("</form>")
-
-    parts.append('<details class="confirm">')
-    parts.append('<summary class="button danger">Sign out every browser</summary>')
-    parts.append('<p>Sign out every browser? The box stays signed in to Claude.</p>')
-    parts.append('<form method="post" action="/browsers/signout-all">' + csrf_field(ctx))
-    parts.append('<button class="danger">Sign out every browser</button>')
-    parts.append("</form>")
-    parts.append("</details>")
-
-    parts.append("</section>")
-    return "\n".join(parts)
+def _browsers(ctx: dict) -> str:
+    """The browsers with a session, and signing out one or all of them."""
+    rows = []
+    for browser in ctx["browsers"]:
+        this = ' <span class="tag">This browser</span>' if browser.get("current") else ""
+        fields = {"id": browser["id"]}
+        rows.append(
+            f'<li class="row"><div class="rowmain"><div>{e(browser_name(browser["label"]))}{this}</div>'
+            f'<div class="rowmeta">Signed in {e(date_text(browser["created"]))}</div></div>'
+            f'<div class="actions">{_form(ctx, "/browsers/signout", "Sign out", css="secondary small", fields=fields)}</div></li>'
+        )
+    everyone = _form(ctx, "/browsers/signout-all", "Sign out all", css="danger small", confirm="Sign out every browser? The box stays signed in to Claude.")
+    return (
+        f'<section class="panel" id="browsers"><div class="panelhead"><h2>Browsers</h2><div class="actions">{everyone}</div></div>'
+        f'<ul class="rows">{"".join(rows)}</ul></section>'
+    )
 
 
-def _claude_section(ctx: dict) -> str:
-    """Signing the box itself out of Claude."""
-    parts = ['<section class="card" id="claude"><h2>Claude</h2>']
-    parts.append('<details class="confirm">')
-    parts.append('<summary class="button danger">Sign the box out</summary>')
-    parts.append('<p>Sign the box out of Claude? Remote Control stops, and every browser is signed out. The keys are kept, and only this account can sign it back in.</p>')
-    parts.append('<form method="post" action="/box/signout">' + csrf_field(ctx))
-    parts.append('<button class="danger">Sign the box out</button>')
-    parts.append("</form>")
-    parts.append("</details>")
-    parts.append("</section>")
-    return "\n".join(parts)
+def _claude(ctx: dict) -> str:
+    """Whose Claude account the box uses, and signing it out."""
+    box = ctx["box"]
+    known = [e(box[name]) for name in ("email", "orgName", "subscriptionType") if box.get(name)]
+    who = " · ".join(known) if box.get("loggedIn") and known else "Not signed in to Claude"
+    if box.get("unknown"):
+        who = "Couldn't check Claude's sign-in just now."
+    confirm = "Sign the box out of Claude? Remote Control stops, and every browser is signed out. The keys are kept, and only this account can sign it back in."
+    return (
+        '<section class="panel" id="claude"><div class="panelhead"><div><h2>Claude</h2>'
+        f'<p class="sub">{who}</p></div><div class="actions">{_form(ctx, "/box/signout", "Sign the box out", css="danger small", confirm=confirm)}</div></div></section>'
+    )
+
+
+def _signed_in(ctx: dict) -> str:
+    """The whole page for a browser with a session."""
+    box = ctx["box"]
+    signin = _signin(ctx) if not box.get("loggedIn") and not box.get("unknown") else ""
+    return (
+        f'<main>{_notices(ctx)}{signin}{_console(ctx)}'
+        f'<div class="twoup">{_files(ctx)}{_environment(ctx)}</div>'
+        f'<div class="twoup">{_ssh(ctx)}{_browsers(ctx)}</div>{_claude(ctx)}</main>'
+        '<dialog id="confirm" aria-labelledby="confirm-text"><p id="confirm-text"></p>'
+        '<form method="dialog" class="formactions"><button class="secondary" value="cancel">Cancel</button>'
+        '<button class="solid-danger" id="confirm-ok" value="ok">Confirm</button></form></dialog>'
+    )
 
 
 def page(ctx: dict) -> str:
     """The whole page for one request's context."""
-    session = ctx["session"]
-    login = ctx["login"]
-
-    if session:
+    if ctx["session"]:
         rc = ctx["rc"]
-        state = rc.get("state", "")
-        login_val = 1 if login.get("active") else 0
-        body_open = '<body data-state="' + e(state) + '" data-login="' + str(login_val) + '">'
-    else:
-        body_open = "<body>"
-
-    sections = []
-    sections.append(_pagehead(ctx))
-    sections.append(_flash_and_error(ctx))
-
-    if not session:
-        sections.append(_signin_section(ctx))
-    else:
-        sections.append(_remote_control(ctx))
-        sections.append(_console_section(ctx))
-        sections.append(_keys_section(ctx))
-        sections.append(_environment_section(ctx))
-        sections.append(_browsers_section(ctx))
-        sections.append(_claude_section(ctx))
-
-    main_content = "\n".join(sections)
-
-    if session:
+        body_tag = f'<body data-state="{e(rc.get("state", ""))}" data-signed-in="{1 if ctx["box"].get("loggedIn") else 0}">'
+        meta = f'<meta name="csrf-token" content="{e(ctx["csrf"])}">'
+        content = _topbar(ctx) + _signed_in(ctx)
         scripts = (
-            '<script src="/static/xterm.js" defer></script>\n'
-            '<script src="/static/xterm-addon-fit.js" defer></script>\n'
+            '<script src="/static/xterm.js" defer></script>'
+            '<script src="/static/xterm-addon-fit.js" defer></script>'
             '<script src="/static/manager.js" defer></script>'
         )
     else:
+        body_tag = '<body class="outside">'
+        meta = ""
+        content = (
+            f'<main class="narrow"><div class="lockup">{MARK}<span>opsbox</span></div>'
+            f"{_notices(ctx)}{_signin(ctx)}</main>"
+        )
         scripts = '<script src="/static/manager.js" defer></script>'
-
-    html_parts = [
-        "<!doctype html>",
-        '<html lang="en">',
-        "<head>",
-        '<meta charset="utf-8">',
-        '<meta name="viewport" content="width=device-width, initial-scale=1">',
-        "<title>opsbox</title>",
-        '<link rel="stylesheet" href="/static/xterm.css">',
-        '<link rel="stylesheet" href="/static/manager.css">',
-        "</head>",
-        body_open,
-        "<main>",
-        main_content,
-        "</main>",
-        scripts,
-        "</body>",
-        "</html>",
-    ]
-
-    return "\n".join(html_parts)
+    head = (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'{meta}<title>opsbox</title><link rel="icon" href="/static/icon.svg" type="image/svg+xml">'
+        '<link rel="stylesheet" href="/static/xterm.css"><link rel="stylesheet" href="/static/manager.css"></head>'
+    )
+    return f"{head}{body_tag}{content}{scripts}</body></html>"

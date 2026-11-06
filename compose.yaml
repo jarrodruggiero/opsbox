@@ -3,8 +3,8 @@
 #   mkdir -m 0700 home && sudo chown 1000:1000 home
 #   docker compose up -d
 #
-# Then open http://<this machine>:8080/ to sign in to Claude and answer the
-# trust question (once each); see the README.
+# Then open http://<this machine>:8080/ to sign in to Claude and answer its
+# first-start questions; see the README.
 #
 # Everything personal lives in ./home: Claude Code's sign-in and settings, SSH
 # keys, kubeconfig, talosconfig, gh's token, and the repositories you clone
@@ -34,6 +34,13 @@ services:
     # uncomment these, so `docker attach` can reach its trust question:
     # tty: true
     # stdin_open: true
+    # Requests are logged, and Docker's default keeps logs for ever: anyone who can
+    # reach the page could otherwise fill the disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     volumes:
       - ./home:/home/opsbox
     # Nothing in the image needs a capability, a setuid binary, or to write

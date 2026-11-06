@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="opsbox">
+  <style>
+    svg { stroke: #1a1d29; }
+    .top { stroke: #4338ca; }
+    @media (prefers-color-scheme: dark) {
+      svg { stroke: #e7eaf4; }
+      .top { stroke: #8b83f0; }
+    }
+  </style>
+  <path d="M3.77 7.25v9.5L12 21.5l8.23-4.75v-9.5"/><path d="M12 12v9.5"/><path class="top" d="M12 2.5l8.23 4.75L12 12 3.77 7.25z"/>
+</svg>

@@ -1,280 +1,430 @@
-/* The manager page. Status always has a word, so colour only adds to it. */
+/* The manager page. Tokens and direction from Stocktake's "deep glass": a washed
+   ground, translucent panels, one gradient on the action that matters. The six
+   spacing steps and the type scale are used everywhere, rather than a margin per
+   rule, which is what keeps the page from looking assembled.
+
+   The accent is indigo because the owner is deutan: it's the one region that
+   stays apart from the status colours for him. Status always has a word too. */
+
 :root {
-  --bg: #fff;
-  --fg: #111;
-  --muted: #6b7280;
-  --card: #f9fafb;
-  --border: #e5e7eb;
-  --accent: #4f46e5;
-  --on-accent: #fff;
-  --danger: #b91c1c;
-  --ok: #15803d;
+  /* Native controls too: an unticked checkbox stays white on a dark page without it. */
+  color-scheme: light dark;
+
+  --fs-small: 0.8125rem;
+  --fs-body: 0.9375rem;
+  --fs-h2: 1rem;
+  --fs-h1: 1.5rem;
+
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.875rem;
+  --sp-4: 1.375rem;
+  --sp-5: 1.875rem;
+
+  --radius: 16px;
+  --radius-sm: 10px;
+  --radius-xs: 7px;
+  --control: 2.375rem;
+  --control-small: 1.875rem;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --bg: #eef0f7;
+  --panel: rgb(255 255 255 / 0.74);
+  --panel-solid: #f7f8fc;
+  --sunken: #e7eaf4;
+  --chrome: rgb(255 255 255 / 0.92);
+  --text: #1a1d29;
+  --muted: #5f6579;
+  --line: rgb(24 24 60 / 0.1);
+  --up: #1a7f37;
+  --down: #c62828;
   --warn: #a16207;
+  --danger: #c62828;
+  --shadow-sm: 0 1px 2px rgb(24 20 60 / 0.06);
+  --shadow: 0 10px 30px rgb(24 20 60 / 0.1);
+  --on-accent: #fff;
+  --accent: #4338ca;
+  --accent-grad: linear-gradient(135deg, #4f46e5, #7c3aed);
+  --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
+  --wash: radial-gradient(1200px 460px at 18% -12%, color-mix(in srgb, var(--accent) 20%, transparent) 0%, transparent 68%);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0b0b0f;
-    --fg: #e5e7eb;
-    --muted: #9ca3af;
-    --card: #111827;
-    --border: #374151;
-    --accent: #818cf8;
-    /* White on the light indigo is under 3:1; dark text is over 7:1. */
-    --on-accent: #0b0b0f;
-    --danger: #f87171;
-    --ok: #22c55e;
-    --warn: #facc15;
+    --bg: #0d1018;
+    --panel: rgb(28 33 50 / 0.72);
+    --panel-solid: #1b2030;
+    --sunken: #141826;
+    --chrome: rgb(20 24 38 / 0.88);
+    --text: #e9ecf6;
+    --muted: #98a0bb;
+    --line: rgb(255 255 255 / 0.09);
+    --up: #2ea043;
+    --down: #f25050;
+    --warn: #e3b341;
+    --danger: #dc2626;
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
+    --shadow: 0 16px 44px rgb(0 0 0 / 0.5);
+    /* White on the lifted indigo measures under 3:1; this is over 7:1. */
+    --on-accent: #0d1018;
+    --accent: #8b83f0;
+    --accent-grad: linear-gradient(135deg, #8b83f0, #b78af5);
   }
 }
+
+*, *::before, *::after { box-sizing: border-box; }
+
+/* Above every display rule below, so `hidden` always wins over flex and grid. */
+[hidden] { display: none !important; }
 
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  background: var(--bg);
-  color: var(--fg);
+  min-height: 100vh;
+  background: var(--bg) var(--wash) no-repeat fixed;
+  color: var(--text);
+  font: var(--fs-body)/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
-main {
-  max-width: 960px;
-  margin: 0 auto;
-  padding: 16px;
-}
+h1, h2, p, ol, ul { margin: 0; }
+h1 { font-size: var(--fs-h1); font-weight: 650; letter-spacing: -0.015em; line-height: 1.2; }
+h2 { font-size: var(--fs-h2); font-weight: 620; letter-spacing: -0.008em; }
 
-.pagehead {
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── the bar ───────────────────────────────────────────────────────────── */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: baseline;
-  justify-content: space-between;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--chrome);
+  border-bottom: 1px solid var(--line);
 }
-
-.card {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 16px;
-  margin: 16px 0;
-  background: var(--card);
-}
-
-/* A link and a summary are content-box and keep the page's font, a button is
-   border-box in its own; without both lines they'd differ in size and face. */
-button, a.button, summary.button {
-  box-sizing: border-box;
-  font-family: inherit;
+.spacer { flex: 1; }
+.brand, .lockup {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--card);
-  color: var(--fg);
-  font-size: 1rem;
-  cursor: pointer;
+  gap: var(--sp-2);
+  color: var(--text);
+  font-weight: 680;
+  letter-spacing: -0.01em;
   text-decoration: none;
-  min-height: 40px;
+}
+.mark { width: 1.625rem; height: 1.625rem; stroke: var(--text); flex: none; }
+.mark .top { stroke: var(--accent); }
+.who { color: var(--muted); font-size: var(--fs-small); overflow-wrap: anywhere; }
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-solid);
+  font-size: var(--fs-small);
+  font-weight: 600;
   white-space: nowrap;
 }
+.state-running .symbol { color: var(--up); }
+.state-backing-off .symbol, .state-asking .symbol { color: var(--warn); }
+.state-stopped .symbol, .state-signed-out .symbol { color: var(--muted); }
 
-button.primary, a.button.primary, summary.button.primary {
-  background: var(--accent);
-  color: var(--on-accent);
-  border-color: var(--accent);
+/* ── the page ──────────────────────────────────────────────────────────── */
+
+main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: var(--sp-4);
 }
+main.narrow { max-width: 28rem; padding-top: 12vh; }
+.lockup { align-self: center; font-size: 1.375rem; }
+.lockup .mark { width: 2.5rem; height: 2.5rem; }
 
-button.danger, a.button.danger, summary.button.danger {
-  color: var(--danger);
-  border-color: var(--danger);
+.twoup {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(24rem, 100%), 1fr));
+  gap: var(--sp-4);
 }
+/* Grid items default to their content's width as a minimum, which lets one long
+   unbroken path push the column past the window. */
+.twoup > * { min-width: 0; }
+/* The forms sit at the foot of their panels, so two panels side by side finish
+   on one line whatever their lists hold. */
+.twoup > .panel { display: flex; flex-direction: column; }
+.twoup > .panel > .stacked { margin-top: auto; }
+.twoup > .panel > .rows, .twoup > .panel > .empty { margin-bottom: var(--sp-3); }
 
-button.small, a.button.small, summary.button.small {
-  padding: 4px 10px;
-  min-height: 32px;
-  font-size: .9rem;
+.panel {
+  padding: var(--sp-4);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
 }
-
-summary.button {
-  list-style: none;
-}
-
-summary.button::-webkit-details-marker {
-  display: none;
-}
-
-:focus-visible {
-  outline: 3px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.headactions, .keyactions {
+.panelhead {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-}
-
-.headactions form, .keyactions form {
-  display: inline;
-}
-
-.keyactions {
-  margin-top: 8px;
-}
-
-/* An open Replace or confirm takes the whole row, so its paste box is the
-   card's width; the buttons after it follow below, in the same order. */
-.keyactions details[open] {
-  flex: 1 1 100%;
-}
-
-.badge {
-  border-radius: 999px;
-  padding: 2px 10px;
-  font-size: .9rem;
-  border: 1px solid var(--border);
-}
-
-.badge.state-running, .badge.set {
-  color: var(--ok);
-}
-
-.badge.state-backing-off, .badge.state-trust-asked {
-  color: var(--warn);
-}
-
-.badge.state-stopped, .badge.state-signed-out, .badge.unset {
-  color: var(--muted);
-}
-
-.terminal {
-  height: 50vh;
-  min-height: 240px;
-  border-radius: 8px;
-  overflow: hidden;
-  background: #0b0b0f;
-}
-
-ul.keys {
-  list-style: none;
-  padding: 0;
-}
-
-li.key {
-  border-top: 1px solid var(--border);
-  padding: 12px 0;
-}
-
-.keyhead {
-  display: flex;
-  gap: 8px;
   align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2) var(--sp-3);
 }
+.headgroup { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-3); min-width: 0; }
+.sub { color: var(--muted); font-size: var(--fs-small); }
+.sub:empty { display: none; }
+.empty { margin-top: var(--sp-3); color: var(--muted); font-size: var(--fs-small); }
 
-.detail {
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+
+/* ── rows: a name and its details on the left, its actions on the right ── */
+
+.rows { margin-top: var(--sp-3); padding: 0; list-style: none; }
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-top: 1px solid var(--line);
+}
+.rows .row:first-child { border-top: 0; padding-top: 0; }
+.rowmain { flex: 1 1 12rem; min-width: 0; }
+/* Wrapped under a long path on a phone, they still end on the same edge as the
+   rows that fit: margin-left, because space-between has nothing to do on a line
+   of one. */
+.row > .actions { margin-left: auto; }
+.rowname { font-family: var(--mono); font-size: var(--fs-small); font-weight: 600; overflow-wrap: anywhere; }
+.rowmeta { color: var(--muted); font-size: var(--fs-small); overflow-wrap: anywhere; }
+.rowmeta.value { font-family: var(--mono); }
+.tag {
+  margin-left: var(--sp-1);
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.6875rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+code.block {
+  display: block;
+  margin-top: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--sunken);
+  border-radius: var(--radius-xs);
+  font-family: var(--mono);
+  font-size: var(--fs-small);
   overflow-wrap: anywhere;
 }
+code.block + .rowmeta { margin-top: var(--sp-2); }
 
-details[open] > form, details > p {
-  margin-top: 8px;
-}
+/* ── buttons: one height per size, so a row of them lines up whatever each is ── */
 
-textarea, input, select {
-  width: 100%;
-  box-sizing: border-box;
+button, a.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--control);
+  padding: 0 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--sunken);
+  color: var(--text);
   font: inherit;
-  padding: 8px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--fg);
-  font-size: 1rem;
+  font-weight: 550;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+  transition: filter 0.14s ease, transform 0.14s ease, border-color 0.14s ease, color 0.14s ease, background 0.14s ease;
 }
+button:active, a.button:active { transform: translateY(1px); }
+button.secondary:hover, a.button.secondary:hover { border-color: var(--accent); color: var(--accent); }
+button.primary {
+  background: var(--accent-grad);
+  border-color: transparent;
+  color: var(--on-accent);
+  box-shadow: var(--shadow-sm);
+}
+button.primary:hover { filter: brightness(1.07); }
+button.danger {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--down) 45%, transparent);
+  color: var(--down);
+}
+button.danger:hover { background: color-mix(in srgb, var(--down) 12%, transparent); border-color: var(--down); }
+button.solid-danger { background: var(--danger); border-color: transparent; color: #fff; }
+button.solid-danger:hover { filter: brightness(1.08); }
+button.text { background: transparent; border-color: transparent; color: var(--muted); }
+button.text:hover { color: var(--text); }
+button.small { min-height: var(--control-small); padding: 0 0.7rem; font-size: var(--fs-small); }
 
-textarea {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
+/* ── forms ─────────────────────────────────────────────────────────────── */
 
-label {
-  display: block;
-  margin: 10px 0 4px;
-  font-weight: 600;
+.stacked {
+  display: grid;
+  gap: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--line);
 }
+.fieldrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(10rem, 100%), 1fr)); gap: var(--sp-3); }
+.field { min-width: 0; }
+label { display: block; margin-bottom: var(--sp-1); font-size: var(--fs-small); font-weight: 600; }
+input, textarea {
+  width: 100%;
+  min-height: var(--control);
+  padding: 0.4rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--sunken);
+  color: var(--text);
+  font: inherit;
+}
+input::placeholder { color: var(--muted); opacity: 0.75; }
+input[name="name"], input[name="value"], input[name="path"], input[name="code"] { font-family: var(--mono); font-size: var(--fs-small); }
+input[type="file"] { padding: 0.25rem; font-size: var(--fs-small); color: var(--muted); cursor: pointer; }
+input[type="file"]::file-selector-button {
+  min-height: var(--control-small);
+  margin-right: var(--sp-2);
+  padding: 0 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--panel-solid);
+  color: var(--text);
+  font: inherit;
+  font-weight: 550;
+  cursor: pointer;
+}
+input[type="file"]::file-selector-button:hover { border-color: var(--accent); color: var(--accent); }
+.formactions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--sp-2); }
+.formactions.spread { justify-content: space-between; }
+label.check { display: inline-flex; align-items: center; gap: var(--sp-2); margin: 0; font-weight: 500; cursor: pointer; }
+label.check input { width: 1rem; height: 1rem; min-height: 0; margin: 0; accent-color: var(--accent); }
 
-form > button {
-  margin-top: 10px;
-}
+/* ── signing in ────────────────────────────────────────────────────────── */
 
-.headactions form > button, .keyactions form > button {
-  margin-top: 0;
+.signin .sub { margin-top: var(--sp-2); }
+.signin .formactions { margin-top: var(--sp-3); }
+.steps { display: grid; gap: var(--sp-3); margin-top: var(--sp-3); padding: 0; list-style: none; counter-reset: step; }
+.steps > li { display: grid; grid-template-columns: 1.75rem minmax(0, 1fr); gap: var(--sp-2); align-items: start; counter-increment: step; }
+.steps > li::before {
+  content: counter(step);
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  margin-top: 0.3rem;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--fs-small);
+  font-weight: 650;
 }
+.steps > li > :not(form) { justify-self: start; }
+.aside { display: flex; justify-content: flex-end; margin-top: var(--sp-1); }
 
-/* Where the Copy fallback puts the text it selects. */
-.offscreen {
-  position: absolute;
-  left: -9999px;
-}
-
-.who, .hint, td small {
-  color: var(--muted);
-}
-
-td small {
-  display: block;
-}
+/* ── Remote Control's question ─────────────────────────────────────────── */
 
 .callout {
-  border-left: 4px solid var(--warn);
-  padding: 10px 14px;
-  margin-top: 12px;
-  border-radius: 8px;
-  background: var(--bg);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2) var(--sp-3);
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: var(--radius-sm);
 }
+.callout p { flex: 1 1 14rem; min-width: 0; font-weight: 550; overflow-wrap: anywhere; }
 
-table.env {
-  width: 100%;
-  border-collapse: collapse;
+/* ── the console ───────────────────────────────────────────────────────── */
+
+.tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
 }
-
-/* The action column takes only what its button needs, so a long value can't
-   squeeze it until "Remove" breaks in two. */
-table.env td:last-child {
-  width: 1%;
+button.tab {
+  min-height: var(--control-small);
+  padding: 0 0.8rem;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-small);
+  border-radius: var(--radius-xs);
 }
+button.tab:hover { color: var(--text); }
+button.tab[aria-selected="true"] { background: var(--panel-solid); color: var(--text); box-shadow: var(--shadow-sm); }
 
-table.env td, table.env th {
-  text-align: left;
-  padding: 6px;
-  border-bottom: 1px solid var(--border);
+/* Always near-black, in both themes: it's a terminal. */
+.termframe {
+  height: clamp(18rem, 58vh, 38rem);
+  margin-top: var(--sp-3);
+  padding: var(--sp-2) var(--sp-1) var(--sp-2) var(--sp-3);
+  background: #0b0e14;
+  border-radius: var(--radius-sm);
+}
+.terminal { width: 100%; height: 100%; overflow: hidden; }
+/* xterm's own stylesheet paints this black, which shows as a stripe under the
+   last row. */
+#console .terminal .xterm .xterm-viewport { background-color: #0b0e14; }
+
+/* ── what happened ─────────────────────────────────────────────────────── */
+
+.notice {
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--panel-solid);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--up);
+  border-radius: var(--radius-xs);
   overflow-wrap: anywhere;
 }
+.notice.bad { border-left-color: var(--down); }
 
-.flash, .error {
-  padding: 10px 14px;
-  border-radius: 8px;
+/* Where the Copy fallback puts the text it selects. */
+.offscreen { position: absolute; left: -9999px; }
+
+/* ── the confirm ───────────────────────────────────────────────────────── */
+
+dialog {
+  width: 100%;
+  max-width: min(28rem, 92vw);
+  padding: var(--sp-4);
+  /* Solid, not glass: a translucent dialog over a dimmed backdrop stacks two
+     transparencies and neither reads. */
+  background: var(--panel-solid);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  color: var(--text);
 }
-
-.flash {
-  border-left: 4px solid var(--ok);
-}
-
-.error {
-  border-left: 4px solid var(--danger);
+dialog[open] { animation: dialog-in 0.18s cubic-bezier(0.2, 0, 0, 1); }
+dialog::backdrop { background: rgb(0 0 0 / 0.55); }
+dialog .formactions { margin-top: var(--sp-4); }
+@keyframes dialog-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: none; }
 }
 
 @media (max-width: 600px) {
-  table.env, table.env thead, table.env tbody, table.env tr, table.env td {
-    display: block;
-  }
-
-  table.env thead {
-    display: none;
-  }
-
-  table.env td:last-child {
-    width: auto;
-  }
-
-  .pagehead {
-    flex-direction: column;
-  }
+  /* Fingers, not a pointer. */
+  :root { --control: 2.625rem; --control-small: 2.25rem; }
+  main { padding: var(--sp-3); gap: var(--sp-3); }
+  .topbar { padding: var(--sp-2) var(--sp-3); }
+  .panel { padding: var(--sp-3); }
+  .who { display: none; }
+  .twoup { gap: var(--sp-3); }
+  main.narrow { padding-top: 6vh; }
 }

@@ -80,7 +80,8 @@ def cmd_remote_control() -> int:
     """Simulate `claude remote-control`.
 
     If FAKE_TRUST=1 and <state>/trusted does not exist, ask the user to
-    trust the directory.  Then print a connected message and the env
+    trust the directory. If FAKE_ENABLE=1, ask for the one-time consent the
+    same way. Then print a connected message and the env
     variable FAKE_SEEN so tests can verify the env file was applied.
     If FAKE_RC_EXIT_AFTER is set, sleep that many seconds and exit 3.
     Otherwise sleep in a loop until killed.
@@ -98,8 +99,19 @@ def cmd_remote_control() -> int:
             print("Not trusted")
             return 1
 
+    # The real CLI's one-time consent, word for word (2.1.311): "y" saves
+    # remoteDialogSeen, anything else exits 0.
+    seen_path = os.path.join(state_dir, "remote-dialog-seen")
+    if os.environ.get("FAKE_ENABLE") == "1" and not os.path.exists(seen_path):
+        print("Enable Remote Control? (y/n) ", end="", flush=True)
+        if sys.stdin.readline().strip().lower() not in ("y", "yes"):
+            return 0
+        with open(seen_path, "w") as f:
+            f.write("1")
+
     print("Remote Control connected", flush=True)
     print(f"env FAKE_SEEN={os.environ.get('FAKE_SEEN', '')}", flush=True)
+    print(f"env TERM={os.environ.get('TERM', '')}", flush=True)
 
     exit_after = os.environ.get("FAKE_RC_EXIT_AFTER")
     if exit_after is not None:

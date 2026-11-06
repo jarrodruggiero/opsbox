@@ -1,7 +1,9 @@
 """Tests for ptyproc, claude, and the fake_claude fixture."""
 from __future__ import annotations
 
+import os
 import pathlib
+import sys
 import time
 
 import pytest
@@ -192,3 +194,154 @@ def test_a_failed_start_leaks_no_descriptors(tmp_path: pathlib.Path) -> None:
         with pytest.raises(OSError):
             proc.start()
     assert open_fds() <= before + 1
+
+
+def _open_fds() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+def test_a_finished_process_leaves_no_descriptors() -> None:
+    """The writer thread closes the terminal once the process has gone, or a supervisor retrying runs out of fds."""
+    before = _open_fds()
+    for _ in range(10):
+        proc = ptyproc.PtyProcess(["/bin/sh", "-c", "true"])
+        proc.start()
+        assert proc.wait(5) == 0
+    deadline = time.monotonic() + 5
+    while _open_fds() > before + 1 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert _open_fds() <= before + 1
+
+
+def test_input_reaches_the_process_in_order() -> None:
+    """Keystrokes go through a queue, and must come out as they went in."""
+    proc = ptyproc.PtyProcess(["/bin/sh", "-c", "stty -echo; read line; echo got:$line"])
+    proc.start()
+    for part in (b"a", b"b", b"c", b"\r"):
+        proc.write(part)
+    assert proc.wait(5) == 0
+    deadline = time.monotonic() + 5
+    while b"got:abc" not in proc.output() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert b"got:abc" in proc.output()
+
+
+def test_a_process_not_reading_cant_hold_a_request() -> None:
+    """Writing to a process that isn't reading returns at once, then refuses, rather than blocking a web request."""
+    proc = ptyproc.PtyProcess(["/bin/sh", "-c", "sleep 30"])
+    proc.start()
+    try:
+        started = time.monotonic()
+        with pytest.raises(OSError, match="isn't reading"):
+            for _ in range(10):
+                proc.write(b"x" * 20000)
+        assert time.monotonic() - started < 2
+    finally:
+        proc.terminate(grace=1)
+
+
+def test_resize_reaches_the_process() -> None:
+    """The terminal on the page and the one the process sees stay the same size."""
+    proc = ptyproc.PtyProcess(["/bin/sh", "-c", "read line; stty size"], cols=80, rows=24)
+    proc.start()
+    proc.resize(133, 37)
+    proc.write(b"\r")
+    assert proc.wait(5) == 0
+    deadline = time.monotonic() + 5
+    while b"37 133" not in proc.output() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert b"37 133" in proc.output()
+
+
+def test_hang_up_ends_what_ignores_a_terminate() -> None:
+    """An interactive shell ignores SIGTERM, and closing it must not take the 5 seconds of a kill."""
+    proc = ptyproc.PtyProcess(["/bin/sh", "-c", "trap '' TERM; while :; do sleep 1; done"])
+    proc.start()
+    time.sleep(0.2)
+    started = time.monotonic()
+    proc.hang_up()
+    assert not proc.running()
+    assert time.monotonic() - started < 4
+
+
+def _run_python(script: str) -> ptyproc.PtyProcess:
+    """A program that, unlike bash, doesn't take the terminal for itself, as Remote Control doesn't."""
+    proc = ptyproc.PtyProcess([sys.executable, "-c", script])
+    proc.start()
+    return proc
+
+
+def _output_has(proc: ptyproc.PtyProcess, text: bytes, timeout: float = 8) -> None:
+    deadline = time.monotonic() + timeout
+    while text not in proc.output():
+        assert time.monotonic() < deadline, f"{text!r} never appeared in {proc.output()!r}"
+        time.sleep(0.02)
+
+
+def test_a_resize_signals_a_program_that_didnt_take_the_terminal() -> None:
+    """stty would read the new size either way; only a controlling terminal gets the program told."""
+    proc = _run_python("import signal, time\nsignal.signal(signal.SIGWINCH, lambda *a: print('told', flush=True))\nprint('ready', flush=True)\ntime.sleep(20)")
+    try:
+        _output_has(proc, b"ready")
+        proc.resize(133, 37)
+        _output_has(proc, b"told")
+    finally:
+        proc.terminate(grace=1)
+
+
+def test_ctrl_c_reaches_a_program_that_didnt_take_the_terminal() -> None:
+    """The console is meant to be real: Ctrl-C has to be an interrupt, not a stray byte."""
+    proc = _run_python("import signal, time\nsignal.signal(signal.SIGINT, lambda *a: print('interrupted', flush=True))\nprint('ready', flush=True)\ntime.sleep(20)")
+    try:
+        _output_has(proc, b"ready")
+        proc.write(b"\x03")
+        _output_has(proc, b"interrupted")
+    finally:
+        proc.terminate(grace=1)
+
+
+def test_settings_for_python_cant_stop_a_program_starting() -> None:
+    """The shim that takes the terminal is Python, and a setting like PYTHONHOME is the program's business, not the shim's."""
+    proc = ptyproc.PtyProcess(["/bin/sh", "-c", "echo started"], env={"PYTHONHOME": "/nonexistent", "PYTHONPATH": "/nonexistent"})
+    proc.start()
+    assert proc.wait(5) == 0
+    _output_has(proc, b"started")
+
+
+def test_a_missing_program_is_an_error_at_start_not_an_exit_later() -> None:
+    """The shim would otherwise hide it behind a successful start."""
+    with pytest.raises(OSError):
+        ptyproc.PtyProcess(["/nonexistent/program"]).start()
+
+
+def test_the_end_is_noticed_even_with_something_holding_the_terminal() -> None:
+    """A job left behind keeps the terminal open for hours; the process it came from has still gone."""
+    proc = ptyproc.PtyProcess(["/bin/sh", "-c", "sleep 30 & echo left; exit 0"])
+    output = proc.subscribe()
+    started = time.monotonic()
+    proc.start()
+    while output.get(timeout=10) is not None:
+        pass
+    assert time.monotonic() - started < 8
+    assert not proc.running()
+
+
+def test_busy_means_a_command_is_running() -> None:
+    """What stops an unwatched shell being closed underneath a long terraform apply."""
+    proc = ptyproc.PtyProcess(["/bin/bash", "--norc", "--noprofile"])
+    proc.start()
+    try:
+        deadline = time.monotonic() + 8
+        while proc.busy() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert proc.busy() is False
+        proc.write(b"sleep 30\r")
+        while not proc.busy() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert proc.busy() is True
+        proc.write(b"\x03")
+        while proc.busy() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert proc.busy() is False
+    finally:
+        proc.hang_up()

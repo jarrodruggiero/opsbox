@@ -35,13 +35,18 @@ CSRF: every state-changing request carries a CSRF token. Before there's a
 session, a random pre-session cookie and a matching form field stand in for
 it, so another site can't start or finish a sign-in on this box.
 
-Never echo a request's text back unescaped, and never show a key's value.
-Without a session the page learns nothing about the box beyond whether it's
-signed in.
+Never echo a request's text back unescaped, and never show a hidden setting's
+value or a file's contents. Without a session the page learns nothing about the
+box beyond whether it's signed in.
+
+A session is the box's own user: it can open a shell and write files. That's what
+it's for, and why everything above guards who gets one.
 """
 from __future__ import annotations
 
 import base64
+import email
+import email.policy
 import hmac
 import http.server
 import ipaddress
@@ -58,10 +63,24 @@ import traceback
 import urllib.parse
 from pathlib import Path
 
-from . import claude, keys
-from .sessions import _write_private
+from . import claude, files, keys
+from .sessions import _write_private, session_id
+from .supervisor import STATE_LABELS, detail_line
 
 MAX_BODY = 131072
+# How much of an upload to read at all. More than a file may be (files.save
+# refuses those), so an oversize file gets its reason rather than a reset connection.
+MAX_UPLOAD = 16 * files.MAX_FILE
+MAX_INPUT = 4096
+# A multipart body's parts (csrf, path, file and room to spare), and the most any
+# one's headers need: parsing costs time before the csrf can even be checked.
+MAX_PARTS = 8
+MAX_PART_HEADERS = 4096
+# A thread each, and parked headers can hold megabytes. Per address, so that one
+# host can only crowd out itself; and in all, as a floor under everything else.
+MAX_CONNECTIONS_PER_CLIENT = 24
+MAX_CONNECTIONS = 256
+LOG_LINE_LIMIT = 200
 SESSION_COOKIE = "opsbox_session"
 PRESESSION_COOKIE = "opsbox_presession"
 FLASH_COOKIE = "opsbox_flash"
@@ -73,6 +92,7 @@ STATIC = {
     "xterm.js": "text/javascript",
     "xterm.css": "text/css",
     "xterm-addon-fit.js": "text/javascript",
+    "icon.svg": "image/svg+xml",
 }
 
 MESSAGES = {
@@ -80,13 +100,15 @@ MESSAGES = {
     "browser-signed-out": "This browser is signed out.",
     "all-signed-out": "Every browser is signed out.",
     "box-signed-out": "The box is signed out of Claude.",
+    "other-signed-out": "That browser is signed out.",
     "saved": "Saved.",
+    "uploaded": "Uploaded.",
     "removed": "Removed.",
     "generated": "Generated.",
+    "answered": "Answered.",
     "started": "Started.",
     "stopped": "Stopped.",
     "restarted": "Restarted.",
-    "trusted": "Trusted.",
 }
 
 SECURITY_HEADERS = {
@@ -104,7 +126,9 @@ SECURITY_HEADERS = {
 # What secrets.token_urlsafe(32) makes. Anything else in the cookie is
 # replaced rather than echoed back in Set-Cookie.
 PRESESSION_SHAPE = re.compile(r"[A-Za-z0-9_-]{43}")
-KEY_IDS = [entry["id"] for entry in keys.CATALOGUE]
+# Keystrokes and terminal sizes: a line per key in the container's log would
+# bury everything else, and keystrokes are never its business.
+QUIET_ROUTES = {"/console/input", "/console/resize", "/shell/input", "/shell/resize"}
 WRONG_HOST = b"Use this box's address, or add the name to OPSBOX_MANAGER_HOSTS."
 
 
@@ -116,6 +140,34 @@ def _same(a: str, b: str) -> bool:
     """Constant-time comparison of two strings of any characters."""
     # As bytes: compare_digest raises on a str with any non-ASCII character.
     return bool(a) and bool(b) and hmac.compare_digest(a.encode(), b.encode())
+
+
+def _multipart(content_type: str, body: bytes) -> dict[str, bytes] | None:
+    """A multipart/form-data body's fields, byte for byte, or None if it isn't a whole one.
+
+    Split by hand rather than handed to email's parser, which rewrites line
+    endings it finds in a part. A file has to arrive exactly as it was, and an
+    upload without its closing boundary was cut short: saving it would replace a
+    good file with part of one.
+    """
+    if len(content_type) > MAX_PART_HEADERS:
+        return None
+    head = email.message_from_string(f"Content-Type: {content_type}\n\n", policy=email.policy.HTTP)
+    boundary = head.get_param("boundary") if head.get_content_type() == "multipart/form-data" else None
+    if not isinstance(boundary, str) or not boundary:
+        return None
+    fields: dict[str, bytes] = {}
+    for part in body.split(b"--" + boundary.encode("latin-1", "replace"), MAX_PARTS + 1)[1:]:
+        if part.startswith(b"--"):
+            return fields
+        headers, separator, payload = part.partition(b"\r\n\r\n")
+        if not separator or len(headers) > MAX_PART_HEADERS:
+            return None
+        disposition = email.message_from_bytes(headers.lstrip() + b"\r\n\r\n", policy=email.policy.HTTP)
+        name = disposition.get_param("name", header="content-disposition")
+        if isinstance(name, str):
+            fields.setdefault(name, payload.removesuffix(b"\r\n"))
+    return None
 
 
 def _clear(name: str) -> str:
@@ -137,6 +189,7 @@ class Manager:
         static_dir: Path,
         claude_path: str | None = None,
         hosts: list[str] | None = None,
+        shells=None,
     ) -> None:
         self.home = home
         self.rc = rc
@@ -145,6 +198,7 @@ class Manager:
         self.render = render
         self.static_dir = static_dir
         self.claude_path = claude_path
+        self.shells = shells
         # Host names compare case-insensitively, and a list typed as
         # "a.home, b.home" means two names.
         self.hosts = [h.strip().lower() for h in hosts or [] if h.strip()]
@@ -154,7 +208,8 @@ class Manager:
         self.login_url: str | None = None
         self.login_owner: str | None = None
         self._box_cache: tuple[float, dict] | None = None
-        self._keys_cache: tuple[float, list[dict]] | None = None
+        self._box_lock = threading.Lock()
+        self._box_generation = 0
         self.lock = threading.Lock()
         self.signin_dir = home / ".config/opsbox/manager/signin"
         self.owner_path = home / ".config/opsbox/manager/owner"
@@ -185,8 +240,21 @@ class Manager:
         cached = self._box_cache
         if cached is not None and time.monotonic() - cached[0] < 5:
             return cached[1]
-        status = claude.auth_status(claude=self.claude_path)
-        self._box_cache = (time.monotonic(), status)
+        # One at a time: each is a process, and anyone on the LAN can ask. Others
+        # get the last answer while it runs, or wait for it if there isn't one.
+        if not self._box_lock.acquire(blocking=cached is None):
+            return cached[1]
+        try:
+            cached = self._box_cache
+            if cached is not None and time.monotonic() - cached[0] < 5:
+                return cached[1]
+            generation = self._box_generation
+            status = claude.auth_status(claude=self.claude_path)
+            # Not if the box's sign-in changed while that ran: it may predate it.
+            if generation == self._box_generation:
+                self._box_cache = (time.monotonic(), status)
+        finally:
+            self._box_lock.release()
         # A box signed in before the manager existed (the CLI, an older image)
         # is adopted: its account becomes the owner.
         account = claude.identity(status)
@@ -194,22 +262,14 @@ class Manager:
             self._record_owner(account)
         return status
 
+    def forget_box_status(self) -> None:
+        """The box's sign-in has just changed: nothing read before now counts."""
+        self._box_generation += 1
+        self._box_cache = None
+
     def box_identity(self) -> tuple[str, str] | None:
         """The box's (email, orgId), or None when it isn't signed in to claude.ai."""
         return claude.identity(self.box_status())
-
-    def describe_keys(self) -> list[dict]:
-        """keys.describe_all(), cached for a minute, because `gh auth status` asks GitHub each time."""
-        cached = self._keys_cache
-        if cached is not None and time.monotonic() - cached[0] < 60:
-            return cached[1]
-        described = keys.describe_all()
-        self._keys_cache = (time.monotonic(), described)
-        return described
-
-    def keys_changed(self) -> None:
-        """Forget the described keys after any change to them."""
-        self._keys_cache = None
 
     def signin_mine(self, owner: str | None) -> bool:
         """Whether a sign-in is in progress and *owner* (a pre-session value) started it."""
@@ -259,7 +319,7 @@ class Manager:
             try:
                 ok = self.login.wait(60)
                 if self.login_kind == "box":
-                    self._box_cache = None
+                    self.forget_box_status()
                     account = claude.identity(self.box_status()) if ok else None
                     if account is None:
                         raise ValueError("Claude didn't accept that code. Start again.")
@@ -268,7 +328,7 @@ class Manager:
                         # Undo it before anything uses it; the supervisor
                         # also refuses to start Remote Control as this account.
                         claude.logout(claude=self.claude_path)
-                        self._box_cache = None
+                        self.forget_box_status()
                         raise WrongAccount("That's a different Claude account from the one this box uses.")
                     self._record_owner(account)
                     token = self.sessions.issue(label)
@@ -297,8 +357,9 @@ class Manager:
         """Stop Remote Control, sign the box out of Claude, and end every browser's session."""
         self.rc.stop()
         claude.logout(claude=self.claude_path)
-        self._box_cache = None
+        self.forget_box_status()
         self.sessions.revoke_all()
+        self.shells.close_all()
 
     def _clear_flow(self) -> None:
         """Cancel the flow, delete a browser flow's throwaway sign-in, and clear the fields."""
@@ -322,14 +383,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # -- logging -----------------------------------------------------------
 
     def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
-        """Log POSTs and failures; skip successful GETs, which the page polls every 5 seconds."""
-        if self.command == "GET" and isinstance(code, int) and code < 400:
+        """Log changes and failures; skip what the page does constantly: its polls and keystrokes."""
+        # No path at all on a request line too broken to have one.
+        quiet = self.command == "GET" or getattr(self, "path", "") in QUIET_ROUTES
+        if quiet and isinstance(code, int) and code < 400:
             return
         super().log_request(code, size)
 
     def log_message(self, format: str, *args: object) -> None:
-        """One line to stderr, without any query string."""
+        """One short line to stderr, without any query string: a stranger chooses the path it holds."""
         line = (format % args).split("?", 1)[0]
+        # Escape sequences would drive the terminal of whoever reads the log.
+        line = re.sub(r"[\x00-\x1f\x7f-\x9f]", lambda found: f"\\x{ord(found[0]):02x}", line)[:LOG_LINE_LIMIT]
         print(f"opsbox-manager: {self.address_string()} {line}", file=sys.stderr, flush=True)
 
     # -- request helpers -----------------------------------------------------
@@ -377,7 +442,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         status = self.manager.box_status()
         if not session:
             return {"loggedIn": bool(status.get("loggedIn")), "owned": self.manager.owner() is not None}
-        return {name: status.get(name) for name in ("loggedIn", "email", "orgName", "subscriptionType")}
+        box = {name: status.get(name) for name in ("loggedIn", "email", "orgName", "subscriptionType")}
+        if status.get("error"):
+            box["unknown"] = True
+        return box
 
     def _login(self, presession: str | None) -> dict:
         """The sign-in in progress, with its link only for the browser that started it."""
@@ -412,8 +480,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         """Send a JSON response."""
         self._send(status, json.dumps(data).encode(), "application/json")
 
+    def _wants_fetch(self) -> bool:
+        """Whether manager.js sent this: it updates the page itself, so a reload's flash would come later, out of place."""
+        return self.headers.get("X-Opsbox-Fetch") == "1"
+
+    def _no_content(self) -> None:
+        """Done, and nothing to say."""
+        self._headers(204, "text/plain")
+
+    def _refuse(self, status: int, message: str) -> None:
+        """Say why not: to manager.js as JSON, to a plain form as the page with an error on it."""
+        if self._wants_fetch():
+            self._json(status, {"error": message})
+        else:
+            self._page(status=status, error=message)
+
     def _redirect(self, flash: str | None = None, cookies: list[str] = ()) -> None:
         """A 303 back to the page, with a flash message id when there is one."""
+        if self._wants_fetch() and not cookies:
+            self._no_content()
+            return
         cookies = list(cookies)
         if flash in MESSAGES:
             cookies.append(f"{FLASH_COOKIE}={flash}; Path=/; HttpOnly; SameSite=Strict; Max-Age=30")
@@ -440,19 +526,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
             set_cookies.append(_clear(FLASH_COOKIE))
         ctx = {
             "session": bool(session),
-            "csrf": self.manager.sessions.csrf(session) if session else presession,
+            "csrf": self.manager.sessions.csrf(session) if session else "",
+            "presession": presession,
             "box": self._box(session),
             "rc": self.manager.rc.status() if session else {},
             "login": self._login(presession),
-            "keys": self.manager.describe_keys() if session else [],
-            # Only what the page manages: LOCAL_LLM_KEY_FILE belongs to its key.
-            "env": {k: v for k, v in keys.get_env().items() if k in keys.ENV_ALLOWED} if session else {},
-            "env_allowed": keys.ENV_ALLOWED if session else {},
-            "browsers": self.manager.sessions.list() if session else [],
+            "ssh": keys.describe_ssh() if session else {},
+            "files": files.listing() if session else [],
+            "env": keys.env_rows() if session else [],
+            "browsers": self._browsers(session) if session else [],
             "flash": flash,
             "error": error,
         }
         self._send(status, self.manager.render(ctx).encode(), "text/html; charset=utf-8", cookies=set_cookies)
+
+    def _browsers(self, session: str) -> list[dict]:
+        """The signed-in browsers, with this one marked."""
+        this = session_id(session)
+        return [{**row, "current": row["id"] == this} for row in self.manager.sessions.list()]
+
+    def _status(self, session: str) -> dict:
+        """What manager.js needs to keep the page current without reloading it."""
+        rc = self.manager.rc.status()
+        symbol, word = STATE_LABELS.get(rc.get("state"), ("?", "Unknown"))
+        shell = self.manager.shells.get(session_id(session))
+        return {
+            "box": self._box(session),
+            "rc": {**rc, "symbol": symbol, "word": word, "detail": detail_line(rc)},
+            "login": {"active": self.manager.login is not None},
+            "shell": {"open": shell is not None and shell.running()},
+        }
 
     def _form(self) -> dict[str, str] | None:
         """The urlencoded body, first value per field; None after sending an error."""
@@ -465,9 +568,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if length < 0 or length > MAX_BODY:
             self._text(413, b"That's too much to send.")
             return None
-        body = self.rfile.read(length).decode("utf-8", errors="replace")
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            self._text(400, b"That form arrived cut short.")
+            return None
         try:
-            fields = urllib.parse.parse_qs(body, keep_blank_values=True, max_num_fields=20)
+            fields = urllib.parse.parse_qs(raw.decode("utf-8", errors="replace"), keep_blank_values=True, max_num_fields=20)
         except ValueError:
             self._text(400, b"That form has too many fields.")
             return None
@@ -515,20 +621,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not session:
                 self._json(401, {"error": "Sign in first."})
                 return
-            self._json(200, {"box": self._box(session), "rc": self.manager.rc.status(),
-                             "login": {"active": self.manager.login is not None}})
+            self._json(200, self._status(session))
         elif path == "/console":
-            self._console()
+            token = self._session()
+            if token:
+                self._stream(self.manager.console, token)
+            else:
+                self._json(401, {"error": "Sign in first."})
+        elif path == "/shell/stream":
+            self._shell_stream()
         else:
             self._text(404, b"Not found.")
 
-    def _console(self) -> None:
-        """Server-sent events: everything kept so far as one "reset" event, then each chunk as it comes."""
+    def _shell_stream(self) -> None:
+        """This browser's shell, as server-sent events."""
         token = self._session()
         if not token:
             self._json(401, {"error": "Sign in first."})
             return
-        console = self.manager.console
+        shell = self.manager.shells.get(session_id(token))
+        if shell is None:
+            self._json(404, {"error": "This browser has no shell open."})
+            return
+        shell.viewer_joined()
+        try:
+            self._stream(shell.console, token, tell_end=True)
+        finally:
+            shell.viewer_left()
+
+    def _stream(self, console, token: str, *, tell_end: bool = False) -> None:
+        """Server-sent events: everything kept so far as one "reset" event, then each chunk as it comes."""
         backlog, q = console.attach()
         checked = time.monotonic()
         try:
@@ -541,9 +663,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 try:
                     chunk = q.get(timeout=15)
                 except queue.Empty:
-                    chunk = b""
-                if chunk is None or not console.subscribed(q):
-                    # Ended, or dropped for falling behind; the page reconnects.
+                    # Closed with this viewer's queue full, the None never arrived.
+                    chunk = None if console.closed else b""
+                if chunk is None:
+                    if tell_end:
+                        self.wfile.write(b"event: end\ndata: \n\n")
+                        self.wfile.flush()
+                    return
+                if not console.subscribed(q):
+                    # Dropped for falling behind; the page reconnects.
                     return
                 # Before anything is written, so a signed-out browser's open
                 # console gets nothing more (checked at most once a second).
@@ -571,6 +699,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _post(self, path: str) -> None:
         """Route a POST by exact path, after the CSRF check."""
+        if path == "/files":
+            self._upload()
+            return
         form = self._form()
         if form is None:
             return
@@ -581,54 +712,145 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not session or not self.manager.sessions.check_csrf(session, form.get("csrf", "")):
             self._text(403, b"Sign in first, then try again.")
             return
-        manager = self.manager
         try:
-            if path == "/rc/start":
-                manager.rc.start()
-                self._redirect("started")
-            elif path == "/rc/stop":
-                manager.rc.stop()
-                self._redirect("stopped")
-            elif path == "/rc/restart":
-                if manager.rc.restart():
-                    self._redirect("restarted")
-                else:
-                    self._page(status=400, error="Remote Control isn't running, so there's nothing to restart.")
-            elif path == "/rc/trust":
-                if manager.rc.answer_trust():
-                    self._redirect("trusted")
-                else:
-                    self._page(status=400, error="Remote Control isn't asking to trust a directory.")
-            elif path == "/keys/ssh/generate":
-                keys.generate_ssh()
-                self._redirect("generated")
-            elif path in {f"/keys/{key_id}" for key_id in KEY_IDS}:
-                keys.set_key(path[len("/keys/"):], form.get("value", ""))
-                self._redirect("saved")
-            elif path in {f"/keys/{key_id}/remove" for key_id in KEY_IDS}:
-                keys.remove_key(path[len("/keys/"):-len("/remove")])
-                self._redirect("removed")
-            elif path == "/env":
-                keys.set_env(form.get("name", ""), form.get("value", ""))
-                self._redirect("saved")
-            elif path == "/browsers/signout":
-                manager.sessions.revoke(session)
-                self._redirect("browser-signed-out", [_clear(SESSION_COOKIE)])
-            elif path == "/browsers/signout-all":
-                manager.sessions.revoke_all()
-                self._redirect("all-signed-out", [_clear(SESSION_COOKIE)])
-            elif path == "/box/signout":
-                manager.sign_box_out()
-                self._redirect("box-signed-out", [_clear(SESSION_COOKIE)])
+            self._action(path, form, session)
+        except keys.Refused as refused:
+            self._refuse(400, str(refused))
+
+    def _action(self, path: str, form: dict[str, str], session: str) -> None:
+        """A signed-in browser's change, by exact path; keys.Refused says why not."""
+        manager = self.manager
+        if path == "/rc/start":
+            manager.rc.start()
+            self._redirect("started")
+        elif path == "/rc/stop":
+            manager.rc.stop()
+            self._redirect("stopped")
+        elif path == "/rc/restart":
+            if manager.rc.restart():
+                self._redirect("restarted")
             else:
-                self._text(404, b"Not found.")
-        except keys.KeyError_ as refused:
-            self._page(status=400, error=str(refused))
-        finally:
-            # After the change as well as before the page reloads, so a page
-            # load in between can't keep the old description for a minute.
-            if path.startswith("/keys/"):
-                manager.keys_changed()
+                self._refuse(400, "Remote Control isn't running, so there's nothing to restart.")
+        elif path == "/rc/answer":
+            answer = form.get("answer")
+            if answer in ("yes", "no") and manager.rc.answer(answer == "yes", form.get("question", "")):
+                self._redirect("answered" if answer == "yes" else "stopped")
+            else:
+                self._refuse(400, "Remote Control isn't asking anything.")
+        elif path == "/console/input":
+            self._typed(manager.rc.write, form, "Remote Control isn't running.")
+        elif path == "/console/resize":
+            size = self._size(form)
+            if size:
+                manager.rc.resize(*size)
+                self._no_content()
+        elif path == "/shell/open":
+            size = self._size(form)
+            if size:
+                manager.shells.open(session_id(session), *size)
+                self._no_content()
+        elif path == "/shell/input":
+            shell = manager.shells.get(session_id(session))
+            self._typed(shell.write if shell else None, form, "This browser has no shell open.")
+        elif path == "/shell/resize":
+            size = self._size(form)
+            shell = manager.shells.get(session_id(session))
+            if size:
+                if shell:
+                    shell.resize(*size)
+                self._no_content()
+        elif path == "/ssh/generate":
+            keys.generate_ssh()
+            self._redirect("generated")
+        elif path == "/ssh/remove":
+            keys.remove_ssh()
+            self._redirect("removed")
+        elif path == "/files/remove":
+            files.remove(form.get("path", ""))
+            self._redirect("removed")
+        elif path == "/env":
+            keys.set_env(form.get("name", ""), form.get("value", ""), hidden=form.get("hidden") == "1")
+            self._redirect("saved")
+        elif path == "/env/remove":
+            keys.remove_env(form.get("name", ""))
+            self._redirect("removed")
+        elif path == "/browsers/signout":
+            this = session_id(session)
+            target = form.get("id") or this
+            # Sessions first: closing a shell takes a moment, and a session still
+            # valid during it could open another.
+            if target == this:
+                manager.sessions.revoke(session)
+            else:
+                manager.sessions.revoke_id(target)
+            manager.shells.close(target)
+            if target == this:
+                self._redirect("browser-signed-out", [_clear(SESSION_COOKIE)])
+            else:
+                self._redirect("other-signed-out")
+        elif path == "/browsers/signout-all":
+            manager.sessions.revoke_all()
+            manager.shells.close_all()
+            self._redirect("all-signed-out", [_clear(SESSION_COOKIE)])
+        elif path == "/box/signout":
+            manager.sign_box_out()
+            self._redirect("box-signed-out", [_clear(SESSION_COOKIE)])
+        else:
+            self._text(404, b"Not found.")
+
+    def _typed(self, write, form: dict[str, str], gone: str) -> None:
+        """Hand keystrokes to a terminal."""
+        data = form.get("data", "")
+        if len(data) > MAX_INPUT:
+            self._json(413, {"error": "That's too much to type at once."})
+        elif write is not None and write(data.encode()):
+            self._no_content()
+        else:
+            self._json(409, {"error": gone})
+
+    def _size(self, form: dict[str, str]) -> tuple[int, int] | None:
+        """A terminal's columns and rows from a form; None after refusing nonsense."""
+        try:
+            cols, rows = int(form.get("cols", "")), int(form.get("rows", ""))
+        except ValueError:
+            cols = rows = 0
+        if 1 <= cols <= 1000 and 1 <= rows <= 1000:
+            return cols, rows
+        self._json(400, {"error": "That isn't a terminal size."})
+        return None
+
+    def _upload(self) -> None:
+        """A file from the page's upload form. The session is checked before the body is even read."""
+        session = self._session()
+        if not session:
+            self._text(403, b"Sign in first, then try again.")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            self._text(411, b"Send a Content-Length.")
+            return
+        if length < 0 or length > MAX_UPLOAD:
+            self._text(413, b"That's too much to send.")
+            return
+        body = self.rfile.read(length)
+        fields = _multipart(self.headers.get("Content-Type", ""), body)
+        if fields is None:
+            self._text(400, b"That isn't an upload.")
+            return
+        csrf = fields.get("csrf", b"").decode("utf-8", errors="replace")
+        if not self.manager.sessions.check_csrf(session, csrf):
+            self._text(403, b"Sign in first, then try again.")
+            return
+        data = fields.get("file", b"")
+        try:
+            if not data:
+                raise keys.Refused("That file is empty.")
+            files.save(fields.get("path", b"").decode("utf-8", errors="replace"), data)
+        except keys.Refused as refused:
+            self._refuse(400, str(refused))
+            return
+        self._redirect("uploaded")
 
     def _signin(self, path: str, form: dict[str, str]) -> None:
         """The sign-in routes, which work before there's a session, so the pre-session cookie guards them."""
@@ -654,9 +876,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._page(status=400, error=str(refused))
 
 
-def serve(manager: Manager, host: str = "0.0.0.0", port: int = 8080) -> http.server.ThreadingHTTPServer:
+class Server(http.server.ThreadingHTTPServer):
+    """A thread per connection, with a limit on how many one address can hold."""
+
+    daemon_threads = True
+    # socketserver's default of 5 resets connections in a burst, and a page load
+    # is one: the page, its stylesheets, its scripts.
+    request_queue_size = 128
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._connections: dict[object, str] = {}
+        self._connections_lock = threading.Lock()
+        super().__init__(*args, **kwargs)
+
+    def verify_request(self, request, client_address) -> bool:
+        """Whether to take this connection: a False closes it, unanswered."""
+        address = client_address[0]
+        with self._connections_lock:
+            held = sum(1 for other in self._connections.values() if other == address)
+            if held >= MAX_CONNECTIONS_PER_CLIENT or len(self._connections) >= MAX_CONNECTIONS:
+                return False
+            self._connections[request] = address
+        return True
+
+    def shutdown_request(self, request) -> None:
+        """A connection has ended, one way or the other."""
+        with self._connections_lock:
+            self._connections.pop(request, None)
+        super().shutdown_request(request)
+
+
+def serve(manager: Manager, host: str = "0.0.0.0", port: int = 8080) -> Server:
     """Create the server (the caller runs serve_forever)."""
-    server = http.server.ThreadingHTTPServer((host, port), Handler)
-    server.daemon_threads = True
+    server = Server((host, port), Handler)
     server.manager = manager
     return server

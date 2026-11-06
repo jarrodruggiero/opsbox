@@ -7,7 +7,7 @@ import pathlib
 import time
 
 
-from opsbox.manager.sessions import Sessions
+from opsbox.manager.sessions import Sessions, session_id
 
 
 def test_issued_token_is_valid_and_others_are_not(tmp_path: pathlib.Path) -> None:
@@ -69,6 +69,21 @@ def test_list_never_shows_hashes(tmp_path: pathlib.Path) -> None:
     text = json.dumps(items)
     assert hashlib.sha256(token.encode()).hexdigest() not in text
     assert token not in text
+
+
+def test_one_browser_can_be_signed_out_by_its_row(tmp_path: pathlib.Path) -> None:
+    """A row's id ends only that session, and can't itself open one."""
+    s = Sessions(tmp_path / "m")
+    first, second = s.issue("a"), s.issue("b")
+    row = next(item for item in s.list() if item["label"] == "a")
+    assert row["id"] == session_id(first)
+    assert s.valid(row["id"]) is False
+
+    s.revoke_id(row["id"])
+    assert s.valid(first) is False
+    assert s.valid(second) is True
+    s.revoke_id("nonsense")
+    assert s.valid(second) is True
 
 
 def test_csrf_matches_only_its_session(tmp_path: pathlib.Path) -> None:
