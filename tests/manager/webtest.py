@@ -14,6 +14,7 @@ import pytest
 
 from opsbox.manager import keys, web
 from opsbox.manager.sessions import Sessions
+from opsbox.manager.shell import Shells
 from opsbox.manager.supervisor import Console
 
 
@@ -22,7 +23,9 @@ class StubRC:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
-        self.trust_asked = False
+        self.typed: list[bytes] = []
+        self.sizes: list[tuple[int, int]] = []
+        self.asking = False
         self.running = True
 
     def start(self) -> None:
@@ -35,12 +38,20 @@ class StubRC:
         self.calls.append("restart")
         return self.running
 
-    def answer_trust(self) -> bool:
-        self.calls.append("trust")
-        return self.trust_asked
+    def answer(self, yes: bool, question: str) -> bool:
+        self.calls.append(f"answer-{'yes' if yes else 'no'}")
+        self.answered = question
+        return self.asking
+
+    def write(self, data: bytes) -> bool:
+        self.typed.append(data)
+        return self.running
+
+    def resize(self, cols: int, rows: int) -> None:
+        self.sizes.append((cols, rows))
 
     def status(self) -> dict:
-        return {"state": "running"}
+        return {"state": "running", "restarts": 0, "last_exit": None, "started_at": 1.0, "pid": 1, "workdir": "/w", "question": None}
 
 
 def render_stub(ctx: dict) -> str:
@@ -57,12 +68,11 @@ class Browser:
         self.agent = agent
         self.cookies: dict[str, str] = {}
 
-    def request(self, method: str, path: str, form: dict | None = None, headers: dict | None = None) -> SimpleNamespace:
+    def request(self, method: str, path: str, form: dict | None = None, headers: dict | None = None, body: bytes | None = None) -> SimpleNamespace:
         """Send one request and keep any cookies it sets."""
         sent = {"Host": self.host, "User-Agent": self.agent}
         if self.cookies:
             sent["Cookie"] = "; ".join(f"{name}={value}" for name, value in self.cookies.items())
-        body = None
         if form is not None:
             body = urllib.parse.urlencode(form).encode()
             sent["Content-Type"] = "application/x-www-form-urlencoded"
@@ -94,12 +104,27 @@ class Browser:
         assert resp.status == 200, resp.body
         return context_of(resp)
 
+    def upload(self, path: str, data: bytes, csrf: str | None = None) -> SimpleNamespace:
+        """Send the page's upload form, as a browser's multipart body."""
+        boundary = "----browserboundary7f3a"
+        token = self.csrf() if csrf is None else csrf
+        parts = []
+        for name, value in (("csrf", token), ("path", path)):
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="x"\r\n'
+            "Content-Type: application/octet-stream\r\n\r\n".encode() + data + b"\r\n"
+        )
+        parts.append(f"--{boundary}--\r\n".encode())
+        return self.request("POST", "/files", body=b"".join(parts), headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+
     def csrf(self) -> str:
         """The CSRF value the page would put in its forms, from the stub's context or the real page."""
         resp = self.get("/")
         assert resp.status == 200, resp.body
         if resp.body.startswith(b"<html>{"):
-            return context_of(resp)["csrf"]
+            ctx = context_of(resp)
+            return ctx["csrf"] or ctx["presession"]
         return re.search(rb'name="csrf" value="([^"]+)"', resp.body).group(1).decode()
 
 
@@ -110,22 +135,8 @@ def context_of(resp: SimpleNamespace) -> dict:
     return json.loads(text[len("<html>"):-len("</html>")])
 
 
-FAKE_GH = """#!/bin/sh
-# Refuses every token and is signed in to nothing, so no test reaches GitHub.
-echo "not signed in to GitHub (fake gh)" >&2
-exit 1
-"""
-
-
 def serve_box(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, render=render_stub):
-    """A manager served on a free port, with a signed-out fake claude, a fake gh and a stub Remote Control."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    (bin_dir / "gh").write_text(FAKE_GH)
-    (bin_dir / "gh").chmod(0o755)
-    monkeypatch.setattr(keys, "GH", str(bin_dir / "gh"))
-    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
-        monkeypatch.delenv(name, raising=False)
+    """A manager served on a free port, with a signed-out fake claude, a stub Remote Control and real /bin/sh shells."""
     home = tmp_path / "box"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -138,18 +149,22 @@ def serve_box(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, render=re
     manager = web.Manager(
         home=home, rc=rc, console=console, sessions=Sessions(home / ".config/opsbox/manager"),
         render=render, static_dir=static, hosts=["opsbox.home"],
+        shells=Shells(workdir=str(home / "workspace"), env_file=keys.env_path(), argv=["/bin/sh"]),
     )
     server = web.serve(manager, host="127.0.0.1", port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield SimpleNamespace(manager=manager, rc=rc, console=console, port=server.server_address[1], home=home)
+    manager.shells.close_all()
     server.shutdown()
     server.server_close()
 
 
 def sign_in(browser: Browser, code: str = "good-code-123") -> SimpleNamespace:
     """Start and finish a sign-in in this browser; the response to the code."""
-    pre = browser.csrf()
+    browser.get("/")
+    # The pre-session cookie, whether or not this browser already has a session.
+    pre = browser.cookies[web.PRESESSION_COOKIE]
     started = browser.post("/signin/start", {"csrf": pre})
     assert started.status == 303, started.body
     return browser.post("/signin/code", {"csrf": pre, "code": code})

@@ -7,7 +7,11 @@ import time
 
 import pytest
 
-from opsbox.manager.supervisor import Console, RemoteControl
+from opsbox.manager.supervisor import MIN_COLS, MIN_ROWS, Console, RemoteControl, pending_question
+
+
+TRUST = "Trust /home/opsbox/workspace? [y/N]"
+ENABLE = "Enable Remote Control? (y/n)"
 
 
 def until(predicate, timeout=10):
@@ -104,57 +108,131 @@ def test_env_file_applies_at_start(fake_claude, setup_sign_in, tmp_path):
     rc.stop()
 
 
-def test_trust_waits_for_a_person(fake_claude, setup_sign_in, tmp_path):
-    """Does not answer trust on its own; answer_trust() is needed."""
-    console = Console()
-    env_file = tmp_path / "env"
-    env_file.write_text("")
-    os.environ["FAKE_TRUST"] = "1"
-    rc = RemoteControl(
-        console,
-        workdir=str(tmp_path / "workdir"),
-        args=[],
-        env_file=env_file,
-        claude=str(fake_claude),
-    )
-    (tmp_path / "workdir").mkdir()
+def test_a_question_waits_for_a_person(rc, monkeypatch):
+    """The manager never answers on its own: the fake only prints "connected" once it has read a "y"."""
+    monkeypatch.setenv("FAKE_TRUST", "1")
     rc.start()
-
-    # State should become "trust-asked" and stay there for at least 1 second.
-    def trust_asked():
-        return rc.status()["state"] == "trust-asked"
-    until(trust_asked)
+    until(lambda: rc.status()["state"] == "asking")
     time.sleep(1)
-    assert rc.status()["state"] == "trust-asked"
-
-    # Now answer the trust question.
-    # Nothing answered it: the fake only prints this once it has read a "y".
+    assert rc.status()["state"] == "asking"
+    assert rc.status()["question"] == "Trust /home/opsbox/workspace? [y/N]"
     assert b"Remote Control connected" not in rc.console.output()
-    result = rc.answer_trust()
-    assert result is True
-    until(lambda: rc.status()["state"] == "running")
+
+    assert rc.answer(True, TRUST) is True
     until(lambda: b"Remote Control connected" in rc.console.output())
-    del os.environ["FAKE_TRUST"]
-    rc.stop()
+    assert rc.status()["state"] == "running" and rc.status()["question"] is None
 
 
-def test_answer_trust_refused_when_not_asked(fake_claude, setup_sign_in, tmp_path):
-    """answer_trust() returns False when not in trust-asked state."""
-    console = Console()
+def test_both_first_start_questions_are_asked_and_answered(rc, monkeypatch):
+    """The real CLI asks to trust the directory, then for one-time consent: both must reach the page, in turn."""
+    monkeypatch.setenv("FAKE_TRUST", "1")
+    monkeypatch.setenv("FAKE_ENABLE", "1")
+    rc.start()
+    until(lambda: rc.status()["question"] == TRUST)
+    assert rc.answer(True, TRUST) is True
+    until(lambda: rc.status()["question"] == ENABLE)
+    assert rc.status()["state"] == "asking"
+    assert rc.answer(True, ENABLE) is True
+    until(lambda: b"Remote Control connected" in rc.console.output())
+    assert rc.status()["state"] == "running"
+
+    # Both answers were saved, so the next start asks nothing.
+    assert rc.restart() is True
+    until(lambda: rc.console.output().count(b"Remote Control connected") == 2)
+    assert rc.status()["state"] == "running"
+
+
+def test_an_answer_only_counts_for_the_question_it_was_read_as(rc, monkeypatch):
+    """A double-click on Trust must not also answer the next question, which nobody has read."""
+    monkeypatch.setenv("FAKE_TRUST", "1")
+    monkeypatch.setenv("FAKE_ENABLE", "1")
+    rc.start()
+    until(lambda: rc.status()["question"] == TRUST)
+    assert rc.answer(True, TRUST) is True
+    until(lambda: rc.status()["question"] == ENABLE)
+    assert rc.answer(True, TRUST) is False
+    time.sleep(0.3)
+    assert rc.status()["question"] == ENABLE
+    assert b"Remote Control connected" not in rc.console.output()
+
+
+def test_a_stop_while_signed_out_leaves_it_startable(fake_claude, tmp_path, monkeypatch):
+    """Stopped during the sign-in check, it says stopped (so Start shows), rather than signed-out with nothing running."""
+    from opsbox.manager import claude as claude_module
+
     env_file = tmp_path / "env"
-    env_file.write_text("")
-    rc = RemoteControl(
-        console,
-        workdir=str(tmp_path / "workdir"),
-        args=[],
-        env_file=env_file,
-        claude=str(fake_claude),
-    )
-    (tmp_path / "workdir").mkdir()
+    rc = RemoteControl(Console(), workdir=str(tmp_path / "workdir"), args=[], env_file=env_file, claude=str(fake_claude))
+    real = claude_module.auth_status
+
+    def stopped_meanwhile(**kwargs):
+        status = real(**kwargs)
+        rc.stop()
+        return status
+
+    monkeypatch.setattr(claude_module, "auth_status", stopped_meanwhile)
+    rc.start()
+    until(lambda: not rc._thread.is_alive())
+    assert rc.status()["state"] == "stopped"
+
+
+def test_typing_the_answer_works_too(rc, monkeypatch):
+    """The console is a real terminal: a "y" typed there answers, and the page stops asking."""
+    monkeypatch.setenv("FAKE_ENABLE", "1")
+    rc.start()
+    until(lambda: rc.status()["state"] == "asking")
+    assert rc.write(b"y\r") is True
+    until(lambda: b"Remote Control connected" in rc.console.output())
+    until(lambda: rc.status()["state"] == "running")
+    assert rc.status()["question"] is None
+
+
+def test_no_stops_rather_than_asking_again(rc, monkeypatch):
+    """No ends the process, and restarting it would only ask again, so the loop stops too."""
+    monkeypatch.setenv("FAKE_ENABLE", "1")
+    rc.start()
+    until(lambda: rc.status()["state"] == "asking")
+    assert rc.answer(False, ENABLE) is True
+    until(lambda: not rc._thread.is_alive())
+    assert rc.status()["state"] == "stopped"
+    assert b"Remote Control connected" not in rc.console.output()
+    assert rc.console.output().count(b"Enable Remote Control?") == 1
+
+
+def test_answer_is_refused_when_nothing_is_asked(rc):
+    """A click left over from a question already gone must not type into the terminal."""
     rc.start()
     until(lambda: rc.status()["state"] == "running")
-    assert rc.answer_trust() is False
-    rc.stop()
+    assert rc.answer(True, ENABLE) is False
+
+
+@pytest.mark.parametrize("output, question", [
+    ("Trust /home/opsbox/workspace? [y/N] ", "Trust /home/opsbox/workspace? [y/N]"),
+    ("before\r\nEnable Remote Control? (y/n) ", "Enable Remote Control? (y/n)"),
+    ("\x1b[33mSecurity warnings found.\x1b[0m Continue anyway? [y/N] ", "Security warnings found. Continue anyway? [y/N]"),
+    ("Enable Remote Control? (y/n) y\r\n", None),
+    ("Enable Remote Control? (y/n) \r\nconnected\r\n", None),
+    ("the docs say answer (y/n) somewhere\r\nand then more\r\n", None),
+    ("", None),
+])
+def test_only_a_question_at_the_end_counts(output, question):
+    """A question is what the output ends on, without a trailing space to trip it, and nothing older."""
+    assert pending_question(output) == question
+
+
+def test_the_terminal_never_shrinks_below_what_the_cli_needs(rc):
+    """The trust check refuses to ask in a tiny terminal, so a phone's size is only taken above the floor."""
+    rc.resize(40, 10)
+    rc.start()
+    until(lambda: rc.status()["state"] == "running")
+    size = rc._proc._cols, rc._proc._rows
+    assert size == (MIN_COLS, MIN_ROWS)
+    rc.resize(150, 50)
+    assert (rc._cols, rc._rows) == (150, 50)
+
+
+def test_write_with_nothing_running_says_so(rc):
+    """Keystrokes with no process behind them are refused, not lost in silence."""
+    assert rc.write(b"x") is False
 
 
 def test_restarts_with_backoff(fake_claude, setup_sign_in, tmp_path):
@@ -317,3 +395,10 @@ def test_a_viewer_that_falls_behind_is_dropped():
         console.feed(chunk)
     assert console.subscribed(q) is False
     assert console.output() == b"abc"
+
+
+def test_remote_control_runs_in_a_terminal_that_does_colour(rc, monkeypatch):
+    """A container has no TERM of its own, and the page's terminal does colour."""
+    monkeypatch.delenv("TERM", raising=False)
+    rc.start()
+    until(lambda: b"env TERM=xterm-256color" in rc.console.output())

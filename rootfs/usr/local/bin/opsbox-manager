@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 """Serve the opsbox manager page, and run Remote Control under it."""
-# Debian's Python, by full path: it has python3-yaml, and PATH starts with
-# ~/.local/bin, which lives in the volume.
+# Debian's Python, by full path: PATH starts with ~/.local/bin, which lives in
+# the volume.
 
 import os
 import signal
@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, "/usr/local/lib")
 
-from opsbox.manager import keys, render, sessions, supervisor, web  # noqa: E402
+from opsbox.manager import keys, render, sessions, shell, supervisor, web  # noqa: E402
 
 
 def mirror(console: supervisor.Console) -> None:
@@ -40,6 +40,7 @@ def main() -> int:
         render=render.page,
         static_dir=Path("/usr/local/lib/opsbox/manager/static"),
         hosts=os.environ.get("OPSBOX_MANAGER_HOSTS", "").split(","),
+        shells=shell.Shells(workdir=workdir, env_file=keys.env_path()),
     )
     manager.clear_stale_signins()
     # Remote Control first: it needs no port, and a box that's already set up

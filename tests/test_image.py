@@ -245,7 +245,7 @@ def waits_with(message: str, *options: str, command: tuple[str, ...] = (), page:
             assert "Sign in to Claude" in fetched.stdout
             # The vendored terminal made it into the image, under the names
             # the page asks for.
-            for name in ("manager.css", "manager.js", "xterm.js", "xterm.css", "xterm-addon-fit.js"):
+            for name in ("manager.css", "manager.js", "xterm.js", "xterm.css", "xterm-addon-fit.js", "icon.svg"):
                 docker("exec", container_id, "curl", "-fsS", "-o", "/dev/null", f"http://127.0.0.1:8080/static/{name}")
     finally:
         docker("rm", "-f", container_id, check=False)
@@ -276,3 +276,115 @@ def test_manager_refuses_workdir_home() -> None:
     result = run("manager", env={"OPSBOX_WORKDIR": "/home/opsbox/"}, check=False)
     assert result.returncode == 1
     assert "trust" in result.stderr
+
+
+def test_page_settings_reach_a_shell_exactly_as_written() -> None:
+    """env.sh exports what the page saved: a token's trailing = survives, and $(...) stays text."""
+    result = run(
+        "bash",
+        "-c",
+        r"""mkdir -p ~/.config/opsbox
+printf 'TOKEN=abc123==\nCMD=$(echo ran)\n# a comment\nbad-name=x\nSPACES=a b\n' > ~/.config/opsbox/env
+. /usr/local/lib/opsbox/env.sh
+printf '[%s][%s][%s]' "$TOKEN" "$CMD" "$SPACES"
+""",
+    )
+    assert result.stdout == "[abc123==][$(echo ran)][a b]"
+
+
+def test_a_setting_named_after_a_readonly_variable_cant_stop_the_box() -> None:
+    """The entrypoint sources env.sh under set -e, with readonly variables of its own: UID, for one."""
+    result = run(
+        "bash",
+        "-c",
+        r"""set -euo pipefail
+readonly WORKDIR=/kept
+mkdir -p ~/.config/opsbox
+printf 'UID=5\nWORKDIR=/elsewhere\nAFTER=reached\n' > ~/.config/opsbox/env
+. /usr/local/lib/opsbox/env.sh
+printf '[%s][%s]' "$WORKDIR" "$AFTER"
+""",
+    )
+    assert result.stdout == "[/kept][reached]"
+
+
+# Run inside the container, because it needs the box's own Python and address.
+# A session is issued directly: a real one needs a real claude.ai sign-in.
+THROUGH_THE_PAGE = r"""
+import base64, http.client, sys, time, urllib.parse
+from pathlib import Path
+sys.path.insert(0, "/usr/local/lib")
+from opsbox.manager.sessions import Sessions
+sessions = Sessions(Path.home() / ".config/opsbox/manager")
+token = sessions.issue("the image test")
+cookie = "opsbox_session=" + token
+csrf = sessions.csrf(token)
+
+def post(path, **fields):
+    conn = http.client.HTTPConnection("127.0.0.1", 8080, timeout=20)
+    conn.request("POST", path, urllib.parse.urlencode({"csrf": csrf, **fields}),
+                 {"Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded"})
+    status = conn.getresponse().status
+    conn.close()
+    return status
+
+assert post("/shell/open", cols=90, rows=30) == 204
+conn = http.client.HTTPConnection("127.0.0.1", 8080, timeout=20)
+conn.request("GET", "/shell/stream", headers={"Cookie": cookie})
+stream = conn.getresponse()
+assert stream.status == 200
+assert post("/shell/input", data="echo shell-$((40+2)) uid-$(id -u) pwd-$PWD term-$TERM size-$(stty size | tr ' ' x) umask-$(umask) path-$PATH; exit\r") == 204
+seen = b""
+deadline = time.monotonic() + 15
+while time.monotonic() < deadline and b"event: end" not in seen:
+    seen += stream.fp.readline()
+output = b"".join(base64.b64decode(line[6:]) for line in seen.split(b"\n") if line.startswith(b"data: ")).decode()
+print(output)
+
+boundary = "----imagetest"
+data = bytes(range(256))
+body = b"".join([
+    (f'--{boundary}\r\nContent-Disposition: form-data; name="csrf"\r\n\r\n{csrf}\r\n').encode(),
+    (f'--{boundary}\r\nContent-Disposition: form-data; name="path"\r\n\r\n~/.kube/config\r\n').encode(),
+    (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="c"\r\n\r\n').encode(), data,
+    (f'\r\n--{boundary}--\r\n').encode(),
+])
+conn = http.client.HTTPConnection("127.0.0.1", 8080, timeout=20)
+conn.request("POST", "/files", body, {"Cookie": cookie, "Content-Type": f"multipart/form-data; boundary={boundary}"})
+assert conn.getresponse().status == 303
+saved = Path.home() / ".kube/config"
+assert saved.read_bytes() == data
+print("upload-mode", oct(saved.stat().st_mode & 0o777), oct(saved.parent.stat().st_mode & 0o777))
+"""
+
+
+def test_shell_and_upload_work_locked_down() -> None:
+    """Through the page, in the image, with the flags compose uses: bash starts, and a file lands under home."""
+    home = "/home/opsbox:uid=1000,gid=1000,mode=0700"
+    result = docker(
+        "run", "-d", "--read-only", "--tmpfs", "/tmp", "--tmpfs", "/var/tmp", "--tmpfs", home,
+        "--cap-drop", "ALL", "--security-opt", "no-new-privileges", IMAGE,
+    )
+    container_id = result.stdout.strip()
+    try:
+        for _ in range(20):
+            if "serving on port" in docker("logs", container_id).stderr:
+                break
+            time.sleep(1)
+        else:
+            pytest.fail("the manager never said it was serving")
+        through = docker("exec", container_id, "/usr/bin/python3", "-c", THROUGH_THE_PAGE, check=False)
+        assert through.returncode == 0, through.stderr
+        assert "shell-42 uid-1000 pwd-/home/opsbox/workspace term-xterm-256color size-30x90 umask-0077" in through.stdout
+        # The same PATH `docker exec bash` has: a login shell's /etc/profile would
+        # drop the mise shims, and with them a repository's pinned tool versions.
+        assert "path-/home/opsbox/.local/bin:/home/opsbox/.local/share/mise/shims:" in through.stdout
+        assert "upload-mode 0o600 0o700" in through.stdout
+        # A real terminal: job control needs it to be the shell's controlling one.
+        assert "no job control" not in through.stdout
+        assert "cannot set terminal process group" not in through.stdout
+        # What a shell prints stays out of the container's log.
+        logs = docker("logs", container_id)
+        assert "shell-42" not in logs.stdout + logs.stderr
+    finally:
+        docker("rm", "-f", container_id, check=False)

@@ -7,12 +7,14 @@ import json
 import os
 import pathlib
 import socket
+import threading
 import time
 
 import pytest
 from webtest import Browser, context_of, raw, sign_in
 
-from opsbox.manager import claude, web
+from opsbox.manager import claude, files, web
+from opsbox.manager.sessions import session_id
 
 
 def test_security_headers_on_every_response(box) -> None:
@@ -116,13 +118,18 @@ def test_reauth_leaves_remote_control_alone(box) -> None:
 
 def test_signed_out_page_says_nothing_about_the_box(box) -> None:
     """Without a session the page learns only whether the box is signed in: no account, state or keys."""
-    assert sign_in(Browser(box.port)).status == 303
+    owner = Browser(box.port)
+    assert sign_in(owner).status == 303
+    # With something on the box to give away.
+    assert owner.post("/env", {"csrf": owner.csrf(), "name": "TZ", "value": "UTC"}).status == 303
+    assert owner.upload("~/.kube/config", b"data").status == 303
+    assert owner.post("/ssh/generate", {"csrf": owner.csrf()}).status == 303
     stranger = Browser(box.port)
     ctx = stranger.ctx()
     assert ctx["session"] is False
     assert ctx["box"] == {"loggedIn": True, "owned": True}
-    assert ctx["rc"] == {} and ctx["keys"] == [] and ctx["env"] == {} and ctx["browsers"] == []
-    assert ctx["csrf"] == stranger.cookies[web.PRESESSION_COOKIE]
+    assert ctx["rc"] == {} and ctx["ssh"] == {} and ctx["files"] == [] and ctx["env"] == [] and ctx["browsers"] == []
+    assert ctx["csrf"] == "" and ctx["presession"] == stranger.cookies[web.PRESESSION_COOKIE]
     assert "me@example.com" not in json.dumps(ctx)
 
 
@@ -152,7 +159,7 @@ def test_api_and_console_need_a_session(box) -> None:
         conn.close()
     assert sign_in(browser).status == 303
     status = json.loads(browser.get("/api/status").body)
-    assert status["rc"] == {"state": "running"} and status["box"]["email"] == "me@example.com"
+    assert status["rc"]["state"] == "running" and status["box"]["email"] == "me@example.com"
 
 
 def test_console_streams(box) -> None:
@@ -215,43 +222,454 @@ def test_flash_is_a_fixed_message(box) -> None:
     assert any(c.startswith(web.FLASH_COOKIE + "=;") and "Max-Age=0" in c for c in resp.set_cookies)
 
 
-def test_key_routes(box) -> None:
-    """Saving, generating and removing keys reach keys.py, and a refused key shows its reason with a 400."""
+def test_ssh_routes(box) -> None:
+    """Generate and Remove reach the key, and the page shows only its public half."""
     browser = Browser(box.port)
     assert sign_in(browser).status == 303
-    refused = browser.post("/keys/kubernetes", {"csrf": browser.csrf(), "value": "hello: world"})
-    assert refused.status == 400
-    assert "kubeconfig" in context_of(refused)["error"]
-
-    assert browser.post("/keys/ssh/generate", {"csrf": browser.csrf()}).status == 303
+    assert browser.ctx()["ssh"] == {"set": False}
+    assert browser.post("/ssh/generate", {"csrf": browser.csrf()}).status == 303
     assert (box.home / ".ssh/id_ed25519").exists()
-    ssh = next(k for k in browser.ctx()["keys"] if k["id"] == "ssh")
-    assert ssh["set"] is True and ssh["public"].startswith("ssh-ed25519 ")
-
-    assert browser.post("/keys/ssh/remove", {"csrf": browser.csrf()}).status == 303
+    ssh = browser.ctx()["ssh"]
+    assert ssh["public"].startswith("ssh-ed25519 ")
+    refused = browser.post("/ssh/generate", {"csrf": browser.csrf()})
+    assert refused.status == 400 and "already an SSH key" in context_of(refused)["error"]
+    assert browser.post("/ssh/remove", {"csrf": browser.csrf()}).status == 303
     assert not (box.home / ".ssh/id_ed25519").exists()
-    assert next(k for k in browser.ctx()["keys"] if k["id"] == "ssh")["set"] is False
-    assert browser.post("/keys/nope", {"csrf": browser.csrf()}).status == 404
-    assert browser.post("/keys/../env", {"csrf": browser.csrf()}).status == 404
 
 
-def test_env_route(box) -> None:
-    """Allowed settings are saved; others are refused with the reason."""
+def test_upload_saves_the_file_byte_for_byte(box) -> None:
+    """Through a real multipart body, every byte arrives as sent, and the page lists it."""
     browser = Browser(box.port)
     assert sign_in(browser).status == 303
-    assert browser.post("/env", {"csrf": browser.csrf(), "name": "TZ", "value": "Australia/Melbourne"}).status == 303
-    assert browser.ctx()["env"] == {"TZ": "Australia/Melbourne"}
-    refused = browser.post("/env", {"csrf": browser.csrf(), "name": "PATH", "value": "/x"})
-    assert refused.status == 400 and "isn't a setting" in context_of(refused)["error"]
+    data = bytes(range(256)) + b"\r\n--not-the-boundary\r\n\r\nend\r\n"
+    resp = browser.upload("~/.kube/config", data)
+    assert resp.status == 303
+    saved = box.home / ".kube/config"
+    assert saved.read_bytes() == data
+    assert saved.stat().st_mode & 0o777 == 0o600
+    ctx = browser.ctx()
+    assert ctx["flash"] == "Uploaded."
+    assert [row["path"] for row in ctx["files"]] == ["~/.kube/config"]
 
 
-def test_trust_route(box) -> None:
-    """Trust is answered only when asked, and says so when it isn't."""
+def test_upload_needs_a_session_and_its_csrf(box) -> None:
+    """Without either, nothing is written; without a session, the body isn't even read."""
+    stranger = Browser(box.port)
+    assert stranger.upload("~/x", b"data", csrf="anything").status == 403
     browser = Browser(box.port)
     assert sign_in(browser).status == 303
-    assert browser.post("/rc/trust", {"csrf": browser.csrf()}).status == 400
-    box.rc.trust_asked = True
-    assert browser.post("/rc/trust", {"csrf": browser.csrf()}).status == 303
+    for csrf in ("wrong", "", browser.cookies[web.PRESESSION_COOKIE]):
+        assert browser.upload("~/x", b"data", csrf=csrf).status == 403
+    assert not (box.home / "x").exists()
+    # Claims a body far over the limit and sends none: answered anyway, at once.
+    reply = raw(box.port, b"POST /files HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Length: 999999\r\n\r\n")
+    assert reply.startswith(b"HTTP/1.0 403")
+
+
+def test_upload_refusals_say_why_on_the_page(box) -> None:
+    """A bad path, an empty file and an oversize file each come back as a reason, and write nothing."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    for path, data, message in (
+        ("/etc/passwd", b"data", "under the box's home"),
+        ("~/.config/opsbox/manager/owner", b"data", "its own files"),
+        ("~/empty", b"", "empty"),
+        ("~/big", b"x" * (files.MAX_FILE + 70000), "limit"),
+    ):
+        resp = browser.upload(path, data)
+        assert resp.status in (400, 413), path
+        assert message in context_of(resp)["error"], path
+    assert not (box.home / "empty").exists() and not (box.home / "big").exists()
+    assert box.manager.owner() == ("me@example.com", "org-1"), "an upload reached the owner file"
+
+
+def test_upload_that_isnt_multipart_is_refused(box) -> None:
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    assert browser.post("/files", {"csrf": browser.csrf(), "path": "~/x"}).status == 400
+    assert not (box.home / "x").exists()
+
+
+def test_a_cut_off_upload_doesnt_replace_a_good_file(box) -> None:
+    """A dropped connection, or a body without its closing boundary, must leave what's there alone."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    assert browser.upload("~/.kube/config", b"the whole kubeconfig").status == 303
+    token, cookie = browser.csrf(), "; ".join(f"{name}={value}" for name, value in browser.cookies.items())
+    boundary = "----cut"
+    start = (
+        f'--{boundary}\r\nContent-Disposition: form-data; name="csrf"\r\n\r\n{token}\r\n'
+        f'--{boundary}\r\nContent-Disposition: form-data; name="path"\r\n\r\n~/.kube/config\r\n'
+        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="c"\r\n\r\nthe first half\r\n'
+    ).encode()
+    head = f"POST /files HTTP/1.0\r\nHost: 127.0.0.1\r\nCookie: {cookie}\r\nContent-Type: multipart/form-data; boundary={boundary}\r\n"
+    # Everything it said it would send, but no closing boundary.
+    reply = raw(box.port, (head + f"Content-Length: {len(start)}\r\n\r\n").encode() + start)
+    assert reply.startswith(b"HTTP/1.0 400")
+    # Fewer bytes than it said, then gone.
+    with socket.create_connection(("127.0.0.1", box.port), timeout=10) as sock:
+        sock.sendall((head + f"Content-Length: {len(start) + 500}\r\n\r\n").encode() + start)
+        sock.shutdown(socket.SHUT_WR)
+        assert sock.recv(64).startswith(b"HTTP/1.0 400")
+    assert (box.home / ".kube/config").read_bytes() == b"the whole kubeconfig"
+
+
+def test_a_cut_off_form_changes_nothing(box) -> None:
+    """A setting's value mustn't be saved as however much of it arrived."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    token, cookie = browser.csrf(), "; ".join(f"{name}={value}" for name, value in browser.cookies.items())
+    body = f"csrf={token}&name=TZ&value=Australia".encode()
+    with socket.create_connection(("127.0.0.1", box.port), timeout=10) as sock:
+        sock.sendall(f"POST /env HTTP/1.0\r\nHost: 127.0.0.1\r\nCookie: {cookie}\r\nContent-Length: {len(body) + 50}\r\n\r\n".encode() + body)
+        sock.shutdown(socket.SHUT_WR)
+        assert sock.recv(64).startswith(b"HTTP/1.0 400")
+    assert browser.ctx()["env"] == []
+
+
+def test_removing_a_file(box) -> None:
+    """Remove reaches a file the page saved, and refuses anything else with the reason."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    assert browser.upload("~/mine", b"data").status == 303
+    assert browser.post("/files/remove", {"csrf": browser.csrf(), "path": "~/mine"}).status == 303
+    assert not (box.home / "mine").exists()
+    (box.home / "other").write_text("kept")
+    refused = browser.post("/files/remove", {"csrf": browser.csrf(), "path": "~/other"})
+    assert refused.status == 400 and "only removes files it saved" in context_of(refused)["error"]
+    assert (box.home / "other").read_text() == "kept"
+
+
+def test_env_routes(box) -> None:
+    """Any name and value can be saved, hidden ones never come back, and Remove works on whatever is there."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    assert browser.post("/env", {"csrf": browser.csrf(), "name": "ANYTHING_AT_ALL", "value": "yes"}).status == 303
+    assert browser.post("/env", {"csrf": browser.csrf(), "name": "QUIET", "value": "SENTINEL-7f3a", "hidden": "1"}).status == 303
+    resp = browser.get("/")
+    assert b"SENTINEL-7f3a" not in resp.body
+    assert context_of(resp)["env"] == [
+        {"name": "ANYTHING_AT_ALL", "hidden": False, "value": "yes"},
+        {"name": "QUIET", "hidden": True, "value": None},
+    ]
+    refused = browser.post("/env", {"csrf": browser.csrf(), "name": "ANTHROPIC_API_KEY", "value": "x"})
+    assert refused.status == 400 and "claude.ai sign-in" in context_of(refused)["error"]
+    assert browser.post("/env/remove", {"csrf": browser.csrf(), "name": "QUIET"}).status == 303
+    assert [row["name"] for row in browser.ctx()["env"]] == ["ANYTHING_AT_ALL"]
+
+
+def test_answer_route(box) -> None:
+    """Yes and No reach Remote Control; anything else, or nothing being asked, says so."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    assert browser.post("/rc/answer", {"csrf": browser.csrf(), "answer": "yes"}).status == 400
+    box.rc.asking = True
+    assert browser.post("/rc/answer", {"csrf": browser.csrf(), "answer": "yes", "question": "Sure? (y/n)"}).status == 303
+    assert box.rc.calls[-1] == "answer-yes"
+    assert box.rc.answered == "Sure? (y/n)", "the question read on the page has to reach the check"
+    assert browser.post("/rc/answer", {"csrf": browser.csrf(), "answer": "no"}).status == 303
+    assert box.rc.calls[-1] == "answer-no"
+    calls = len(box.rc.calls)
+    assert browser.post("/rc/answer", {"csrf": browser.csrf(), "answer": "maybe"}).status == 400
+    assert len(box.rc.calls) == calls
+
+
+def test_typing_into_the_console(box) -> None:
+    """Keystrokes reach Remote Control byte for byte, and need a session and its csrf like any change."""
+    browser = Browser(box.port)
+    assert browser.post("/console/input", {"csrf": browser.csrf(), "data": "x"}).status == 403
+    assert sign_in(browser).status == 303
+    assert browser.post("/console/input", {"csrf": "wrong", "data": "x"}).status == 403
+    assert box.rc.typed == []
+    keys_typed = "y\r\x03\x1b[A é"
+    assert browser.post("/console/input", {"csrf": browser.csrf(), "data": keys_typed}).status == 204
+    assert box.rc.typed == [keys_typed.encode()]
+    box.rc.running = False
+    assert browser.post("/console/input", {"csrf": browser.csrf(), "data": "x"}).status == 409
+    assert browser.post("/console/input", {"csrf": browser.csrf(), "data": "x" * 5000}).status == 413
+
+
+def test_resizing_the_console(box) -> None:
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    assert browser.post("/console/resize", {"csrf": browser.csrf(), "cols": "132", "rows": "40"}).status == 204
+    assert box.rc.sizes == [(132, 40)]
+    for cols, rows in (("x", "40"), ("0", "40"), ("132", "-1"), ("99999", "40"), ("", "")):
+        assert browser.post("/console/resize", {"csrf": browser.csrf(), "cols": cols, "rows": rows}).status == 400
+    assert box.rc.sizes == [(132, 40)]
+
+
+def test_a_fetch_gets_no_redirect_and_no_flash_for_later(box) -> None:
+    """manager.js updates the page itself: a 303 would make it fetch the page, and a flash would show on the next reload."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    browser.get("/")
+    resp = browser.post("/rc/start", {"csrf": browser.csrf()}, headers={"X-Opsbox-Fetch": "1"})
+    assert resp.status == 204
+    assert not any(c.startswith(web.FLASH_COOKIE + "=started") for c in resp.set_cookies)
+    box.rc.running = False
+    refused = browser.post("/rc/restart", {"csrf": browser.csrf()}, headers={"X-Opsbox-Fetch": "1"})
+    assert refused.status == 400 and "nothing to restart" in json.loads(refused.body)["error"]
+
+
+def test_status_has_what_the_page_needs_to_update_itself(box) -> None:
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    rc = json.loads(browser.get("/api/status").body)["rc"]
+    assert (rc["state"], rc["symbol"], rc["word"], rc["detail"], rc["question"]) == ("running", "\u25cf", "Running", "", None)
+
+
+def read_event(resp) -> list[str]:
+    """One server-sent event's lines, skipping keepalives."""
+    lines: list[str] = []
+    while True:
+        line = resp.fp.readline().decode().rstrip("\n")
+        if line == "" and lines:
+            return lines
+        if line and not line.startswith(":"):
+            lines.append(line)
+
+
+def open_stream(browser: Browser, path: str):
+    conn = http.client.HTTPConnection("127.0.0.1", browser.port, timeout=10)
+    cookie = "; ".join(f"{name}={value}" for name, value in browser.cookies.items())
+    conn.request("GET", path, headers={"Host": "127.0.0.1", "Cookie": cookie})
+    return conn, conn.getresponse()
+
+
+def test_a_shell_over_the_page(box) -> None:
+    """Open, type, read the answer in the stream, and see it end: the shell's whole round trip."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    assert browser.post("/shell/open", {"csrf": browser.csrf(), "cols": "90", "rows": "30"}).status == 204
+    conn, resp = open_stream(browser, "/shell/stream")
+    try:
+        assert resp.status == 200
+        assert read_event(resp)[0] == "event: reset"
+        assert browser.post("/shell/input", {"csrf": browser.csrf(), "data": "echo round-$((20+1)); stty size; exit\r"}).status == 204
+        seen = b""
+        while True:
+            lines = read_event(resp)
+            if lines[0] == "event: end":
+                break
+            seen += base64.b64decode(lines[0][len("data: "):])
+        assert b"round-21" in seen
+        assert b"30 90" in seen
+    finally:
+        conn.close()
+    assert browser.post("/shell/input", {"csrf": browser.csrf(), "data": "x"}).status == 409
+
+
+def test_shells_need_a_session_csrf_and_one_of_their_own(box) -> None:
+    """A browser reaches only its own shell, and nothing here works without a session."""
+    stranger = Browser(box.port)
+    assert stranger.post("/shell/open", {"csrf": stranger.csrf(), "cols": "90", "rows": "30"}).status == 403
+    conn, resp = open_stream(stranger, "/shell/stream")
+    assert resp.status == 401
+    conn.close()
+
+    mine, theirs = Browser(box.port), Browser(box.port)
+    assert sign_in(mine).status == 303 and sign_in(theirs).status == 303
+    assert mine.post("/shell/open", {"csrf": "wrong", "cols": "90", "rows": "30"}).status == 403
+    conn, resp = open_stream(mine, "/shell/stream")
+    assert resp.status == 404
+    conn.close()
+
+    assert mine.post("/shell/open", {"csrf": mine.csrf(), "cols": "90", "rows": "30"}).status == 204
+    assert theirs.post("/shell/input", {"csrf": theirs.csrf(), "data": "x"}).status == 409
+    conn, resp = open_stream(theirs, "/shell/stream")
+    assert resp.status == 404
+    conn.close()
+
+
+def test_signing_out_ends_the_shell(box) -> None:
+    """A browser's shell goes with its session, whichever way the session ends."""
+    def opened() -> tuple[Browser, object]:
+        browser = Browser(box.port)
+        assert sign_in(browser).status == 303
+        assert browser.post("/shell/open", {"csrf": browser.csrf(), "cols": "90", "rows": "30"}).status == 204
+        return browser, box.manager.shells.get(session_id(browser.cookies[web.SESSION_COOKIE]))
+
+    browser, shell = opened()
+    assert shell.running()
+    assert browser.post("/browsers/signout", {"csrf": browser.csrf()}).status == 303
+    assert not shell.running()
+
+    browser, shell = opened()
+    other, other_shell = opened()
+    their_id = session_id(other.cookies[web.SESSION_COOKIE])
+    assert browser.post("/browsers/signout", {"csrf": browser.csrf(), "id": their_id}).status == 303
+    assert not other_shell.running() and shell.running()
+    assert other.get("/api/status").status == 401 and browser.get("/api/status").status == 200
+
+    assert browser.post("/browsers/signout-all", {"csrf": browser.csrf()}).status == 303
+    assert not shell.running()
+
+    browser, shell = opened()
+    assert browser.post("/box/signout", {"csrf": browser.csrf()}).status == 303
+    assert not shell.running()
+
+
+def test_the_browsers_list_marks_this_one(box) -> None:
+    first, second = Browser(box.port, agent="first"), Browser(box.port, agent="second")
+    assert sign_in(first).status == 303 and sign_in(second).status == 303
+    rows = {row["label"]: row["current"] for row in first.ctx()["browsers"]}
+    assert rows == {"first": True, "second": False}
+
+
+def test_a_shell_can_be_picked_up_again_after_a_reload(box) -> None:
+    """A second stream replays what the first one saw: the same shell, not a new one."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    assert browser.post("/shell/open", {"csrf": browser.csrf(), "cols": "90", "rows": "30"}).status == 204
+    assert browser.post("/shell/input", {"csrf": browser.csrf(), "data": "echo before-$((1+1))\r"}).status == 204
+    shell = box.manager.shells.get(session_id(browser.cookies[web.SESSION_COOKIE]))
+    deadline = time.monotonic() + 5
+    while b"before-2" not in shell.console.output() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert browser.post("/shell/open", {"csrf": browser.csrf(), "cols": "90", "rows": "30"}).status == 204
+    conn, resp = open_stream(browser, "/shell/stream")
+    try:
+        assert b"before-2" in base64.b64decode(read_event(resp)[1][len("data: "):])
+    finally:
+        conn.close()
+    assert box.manager.shells.get(session_id(browser.cookies[web.SESSION_COOKIE])) is shell
+
+
+def test_a_viewer_is_counted_while_the_stream_is_open(box) -> None:
+    """The idle clock is stopped by a real stream, and restarts when it goes: nothing calls these by hand."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    assert browser.post("/shell/open", {"csrf": browser.csrf(), "cols": "90", "rows": "30"}).status == 204
+    shell = box.manager.shells.get(session_id(browser.cookies[web.SESSION_COOKIE]))
+    assert shell.idle_for() > 0
+    conn, resp = open_stream(browser, "/shell/stream")
+    read_event(resp)
+    assert shell.idle_for() == 0
+    resp.close()
+    conn.close()
+    # The server finds out on its next write.
+    deadline = time.monotonic() + 10
+    while shell.idle_for() == 0 and time.monotonic() < deadline:
+        shell.write(b"echo x\r")
+        time.sleep(0.1)
+    assert shell.idle_for() > 0
+
+
+def test_status_says_whether_this_browsers_shell_is_there(box) -> None:
+    """The page decides from this whether to reconnect or say the shell has ended."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    assert json.loads(browser.get("/api/status").body)["shell"] == {"open": False}
+    assert browser.post("/shell/open", {"csrf": browser.csrf(), "cols": "90", "rows": "30"}).status == 204
+    assert json.loads(browser.get("/api/status").body)["shell"] == {"open": True}
+
+
+def test_an_unreadable_status_isnt_reported_as_signed_out(box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One slow `claude auth status` mustn't make the page reload, or offer a sign-in over the box's own."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    monkeypatch.setattr(claude, "auth_status", lambda **kwargs: {"loggedIn": False, "authMethod": "none", "error": "took too long"})
+    box.manager.forget_box_status()
+    assert json.loads(browser.get("/api/status").body)["box"]["unknown"] is True
+    assert browser.ctx()["box"]["unknown"] is True
+
+
+def test_a_stranger_cant_multiply_status_processes(box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each check is a process and anyone on the LAN can ask: a crowd of page loads runs one."""
+    runs = []
+
+    def slow(**kwargs) -> dict:
+        runs.append(1)
+        time.sleep(0.4)
+        return {"loggedIn": False, "authMethod": "none"}
+
+    monkeypatch.setattr(claude, "auth_status", slow)
+    box.manager.forget_box_status()
+    replies = []
+    threads = [threading.Thread(target=lambda: replies.append(Browser(box.port).get("/").status)) for _ in range(12)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert replies == [200] * 12
+    assert len(runs) == 1
+
+
+def test_a_check_begun_before_a_sign_in_doesnt_count_after_it(box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Or a poll that started while signed out would make a good sign-in look refused."""
+    release = threading.Event()
+    started = threading.Event()
+    real = claude.auth_status
+
+    def held(**kwargs) -> dict:
+        status = real(**kwargs)
+        started.set()
+        release.wait(5)
+        return status
+
+    monkeypatch.setattr(claude, "auth_status", held)
+    box.manager.forget_box_status()
+    old_check = threading.Thread(target=box.manager.box_status)
+    old_check.start()
+    started.wait(5)
+    box.manager.forget_box_status()
+    release.set()
+    old_check.join()
+    assert box.manager._box_cache is None
+
+
+def test_one_address_cant_hold_every_connection(box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Idle or dripping connections from one host take a thread each, and only ever crowd out that host."""
+    monkeypatch.setattr(web, "MAX_CONNECTIONS_PER_CLIENT", 3)
+    held = [socket.create_connection(("127.0.0.1", box.port), timeout=10) for _ in range(3)]
+    try:
+        time.sleep(0.2)
+        with socket.create_connection(("127.0.0.1", box.port), timeout=10) as extra:
+            assert extra.recv(1) == b""
+    finally:
+        for sock in held:
+            sock.close()
+    # Freed as they close.
+    deadline = time.monotonic() + 35
+    while time.monotonic() < deadline:
+        try:
+            if Browser(box.port).get("/").status == 200:
+                return
+        except OSError:
+            time.sleep(0.2)
+    pytest.fail("the connections were never freed")
+
+
+def test_a_stranger_cant_write_escape_sequences_or_much_else_to_the_log(box, capsys: pytest.CaptureFixture) -> None:
+    """The log is read in a terminal, and Docker keeps all of it."""
+    capsys.readouterr()
+    raw(box.port, b"GET /\x1b]0;owned\x07" + b"x" * 5000 + b" HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+    log = capsys.readouterr().err
+    assert "\x1b" not in log and "\x07" not in log
+    assert "owned" in log
+    assert max(len(line) for line in log.splitlines()) < 300
+
+
+def test_a_request_line_too_broken_to_have_a_path_gets_an_answer(box, capsys: pytest.CaptureFixture) -> None:
+    """Not a traceback in the log: stdlib sets no path on it, and logging it mustn't assume one."""
+    capsys.readouterr()
+    # An HTTP/0.9 reply, by stdlib's reading of it: the error page, with no status line.
+    assert b"Error code: 400" in raw(box.port, b"GET / HTTX/1.0\r\n\r\n")
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_keystrokes_stay_out_of_the_log(box, capsys: pytest.CaptureFixture) -> None:
+    """A line per key would bury the log, and what's typed in a terminal is nobody's business."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    capsys.readouterr()
+    browser.post("/console/input", {"csrf": browser.csrf(), "data": "x"})
+    browser.post("/console/resize", {"csrf": browser.csrf(), "cols": "90", "rows": "30"})
+    assert browser.post("/rc/start", {"csrf": browser.csrf()}).status == 303
+    log = capsys.readouterr().err
+    assert "/console/" not in log
+    assert "/rc/start" in log
 
 
 def test_signouts(box) -> None:

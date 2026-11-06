@@ -15,7 +15,7 @@ import pytest
 import webtest
 from webtest import Browser, raw, sign_in
 
-from opsbox.manager import keys, render
+from opsbox.manager import render
 
 MARKUP = "<script>alert(1)</script>\"'"
 VALUES = [
@@ -30,26 +30,29 @@ VALUES = [
     " ",
 ]
 
-# Each route, the fields it reads besides csrf, and the files under HOME it
-# may change. Sign-outs are walked separately: they end the session the walk
-# depends on.
+# Each route, the fields it reads besides csrf, and the files under HOME it may
+# change. The sign-outs of a whole browser are walked separately: they end the
+# session the walk depends on.
 ENV_FILE = ".config/opsbox/env"
+ENV_FILES = {ENV_FILE, ".config/opsbox/env-hidden.json"}
+SSH_FILES = {".ssh/id_ed25519", ".ssh/id_ed25519.pub"}
 ROUTES: dict[str, tuple[list[str], set[str]]] = {
     "/rc/start": ([], set()),
     "/rc/stop": ([], set()),
     "/rc/restart": ([], set()),
-    "/rc/trust": ([], set()),
-    "/env": (["name", "value"], {ENV_FILE}),
-    "/keys/ssh/generate": ([], {".ssh/id_ed25519", ".ssh/id_ed25519.pub"}),
+    "/rc/answer": (["answer"], set()),
+    "/console/input": (["data"], set()),
+    "/console/resize": (["cols", "rows"], set()),
+    "/shell/open": (["cols", "rows"], set()),
+    "/shell/input": (["data"], set()),
+    "/shell/resize": (["cols", "rows"], set()),
+    "/ssh/generate": ([], SSH_FILES),
+    "/ssh/remove": ([], SSH_FILES),
+    "/files/remove": (["path"], {".config/opsbox/files.json"}),
+    "/env": (["name", "value", "hidden"], ENV_FILES),
+    "/env/remove": (["name"], ENV_FILES),
+    "/browsers/signout": (["id"], set()),
 }
-for _key in keys.CATALOGUE:
-    _own = {keys.PATHS[_key["id"]]} if _key["id"] in keys.PATHS else set()
-    if _key["id"] == "local-llm":
-        _own.add(ENV_FILE)
-    if _key["id"] == "ssh":
-        _own.add(".ssh/id_ed25519.pub")
-    ROUTES[f"/keys/{_key['id']}"] = (["value"], _own)
-    ROUTES[f"/keys/{_key['id']}/remove"] = ([], _own)
 
 
 @pytest.fixture
@@ -96,6 +99,8 @@ def test_every_field_survives_hostile_input(box, route: str) -> None:
             resp = browser.post(route, form)
             where = f"{route} {field}={value[:20]!r}"
             assert_safe(resp, where)
+            # What it stored has to be safe on the page too, not only in the reply.
+            assert_safe(browser.get("/"), f"the page after {where}")
             stray = changed(before, snapshot(box.home)) - own - BOOKKEEPING
             assert not stray, f"{where}: wrote {sorted(stray)}"
             # What it may write must still be readable: Remote Control's start
@@ -126,7 +131,7 @@ def test_hostile_csrf_on_every_signed_in_route(box) -> None:
     """Any odd csrf on any signed-in route, the sign-outs included, is a 403 and changes nothing."""
     browser = Browser(box.port)
     assert sign_in(browser).status == 303
-    routes = sorted(ROUTES) + ["/browsers/signout", "/browsers/signout-all", "/box/signout"]
+    routes = sorted(ROUTES) + ["/browsers/signout-all", "/box/signout"]
     before = snapshot(box.home)
     for route in routes:
         for value in VALUES:
@@ -164,11 +169,69 @@ def test_odd_paths_are_404s(box, path: str) -> None:
     b"POST /signin/start HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\n\r\n\xff\xfe\x00\x01\x02",
     b"POST /signin/start HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Length: 99999999999999999999\r\n\r\n",
     b"GET /static/%2e%2e%2fweb.py HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n",
+    b"GET / HTTX/1.0\r\n\r\n",
+    b"NONSENSE\r\n\r\n",
+    b"GET /\x1b]0;x\x07 HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n",
 ])
 def test_malformed_requests(box, request_bytes: bytes) -> None:
     """Requests no browser would send get an answer that isn't a 500, and nothing is echoed back."""
     response = raw(box.port, request_bytes)
     status_line = response.split(b"\r\n", 1)[0]
-    assert status_line.startswith(b"HTTP/1."), response[:200]
-    assert int(status_line.split()[1]) < 500, status_line
+    if status_line.startswith(b"HTTP/1."):
+        assert int(status_line.split()[1]) < 500, status_line
+    else:
+        # Too broken to have a version, so stdlib answers as HTTP/0.9: the error page alone.
+        assert b"Error code: 400" in response, response[:200]
     assert b"evil" not in response
+
+
+@pytest.mark.parametrize("value", VALUES)
+def test_hostile_upload_paths_and_contents(box, value: str) -> None:
+    """Any path is refused or lands under home, and contents are only ever bytes in a file."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    outside = box.home.parent
+    before = {p for p in outside.iterdir()}
+    resp = browser.upload(value, value.encode() or b"x")
+    assert_safe(resp, f"upload path={value[:20]!r}")
+    assert {p for p in outside.iterdir()} == before, "wrote beside the home directory"
+    assert not (outside / "etc").exists()
+
+
+@pytest.mark.parametrize("content_type, body", [
+    ("multipart/form-data", b"--x\r\n\r\n"),
+    ("multipart/form-data; boundary=", b"anything"),
+    ("multipart/form-data; boundary=x", b"no boundary in here at all"),
+    ("multipart/form-data; boundary=x", b"--x\r\nno blank line"),
+    ("multipart/form-data; boundary=x", b"--x\r\n\r\n--x--"),
+    ("multipart/form-data; boundary=x", b"--x\r\nContent-Disposition: form-data\r\n\r\nno name\r\n--x--"),
+    ("multipart/form-data; boundary=x", b"".join(b"--x\r\nContent-Disposition: form-data; name=\"f%d\"\r\n\r\nv\r\n" % i for i in range(50)) + b"--x--"),
+    ("text/plain", b"hello"),
+    ("multipart/form-data; boundary=\xff\xfe", b"\xff\xfe\x00"),
+])
+def test_malformed_uploads(box, content_type: str, body: bytes) -> None:
+    """A signed-in browser sending nonsense gets an answer that isn't a 500, and nothing is written."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    before = snapshot(box.home)
+    resp = browser.request("POST", "/files", body=body, headers={"Content-Type": content_type})
+    assert_safe(resp, content_type)
+    assert changed(before, snapshot(box.home)) - BOOKKEEPING == set()
+
+
+def test_nothing_secret_ever_reaches_a_response(box) -> None:
+    """A hidden setting, an uploaded file's contents and the private key appear in no page and no status."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    sentinel = "SENTINEL-7f3a"
+    assert browser.post("/env", {"csrf": browser.csrf(), "name": "QUIET", "value": sentinel, "hidden": "1"}).status == 303
+    assert browser.upload("~/.kube/config", sentinel.encode()).status == 303
+    assert browser.post("/ssh/generate", {"csrf": browser.csrf()}).status == 303
+    private_line = (box.home / ".ssh/id_ed25519").read_text().splitlines()[1].encode()
+    for path in ("/", "/api/status"):
+        body = browser.get(path).body
+        assert sentinel.encode() not in body, path
+        assert private_line not in body and b"PRIVATE KEY" not in body, path
+    # Refusals too: a bad save echoes the name at most, never the value.
+    refused = browser.post("/env", {"csrf": browser.csrf(), "name": "BAD NAME", "value": sentinel})
+    assert sentinel.encode() not in refused.body

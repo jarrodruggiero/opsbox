@@ -208,9 +208,8 @@ WORKDIR /home/opsbox
 EXPOSE 8080
 
 # tini reaps the sessions' child processes and forwards signals. The manager
-# serves the page that signs in and answers the trust question, and answers
-# nothing on its own. It runs claude remote-control with --spawn same-dir,
-# which answers the question remote-control would otherwise ask on its first
-# start.
+# serves the page where a person signs in and answers Remote Control's
+# questions, and answers none on its own. It runs claude remote-control with
+# --spawn same-dir, which settles the one question that has a safe default.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/opsbox-entrypoint"]
 CMD ["manager"]

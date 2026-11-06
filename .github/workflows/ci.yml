@@ -92,7 +92,7 @@ jobs:
       - name: Lint the shell scripts
         run: |
           docker run --rm -v "$PWD:/src:ro" -w /src opsbox:ci shellcheck \
-            rootfs/usr/local/bin/opsbox-entrypoint scripts/*.sh
+            rootfs/usr/local/bin/opsbox-entrypoint rootfs/usr/local/lib/opsbox/env.sh scripts/*.sh
 
       - name: Test the image
         env:

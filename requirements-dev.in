@@ -1,3 +1,1 @@
 pytest==9.2.0
-# keys.py reads kubeconfigs with it; the image has it as Debian's python3-yaml.
-pyyaml==6.0.3

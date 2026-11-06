@@ -33,7 +33,7 @@ Usage: opsbox-entrypoint [manager [OPTIONS...]]
 With manager (the image's default command) or no arguments: serve the
 manager page on port 8080, and run claude remote-control --spawn same-dir
 OPTIONS... in WORKDIR under it. Open http://<this box>:8080/ to sign in to
-Claude, answer the trust question and manage the keys.
+Claude, answer its questions, open a shell and manage the keys.
 
 With remote-control: wait until Claude Code is signed in, then run claude
 remote-control OPTIONS... in WORKDIR directly, without the page. Sign in
