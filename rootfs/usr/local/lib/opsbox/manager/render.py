@@ -262,7 +262,7 @@ def _environment_section(ctx: dict) -> str:
             parts.append("<tr>")
             parts.append("<td>" + e(name))
             if purpose:
-                parts.append('<br><small>' + e(purpose) + "</small>")
+                parts.append("<small>" + e(purpose) + "</small>")
             parts.append("</td>")
             parts.append("<td>" + e(value) + "</td>")
             parts.append("<td>")

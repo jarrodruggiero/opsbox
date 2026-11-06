@@ -1,0 +1,280 @@
+/* The manager page. Status always has a word, so colour only adds to it. */
+:root {
+  --bg: #fff;
+  --fg: #111;
+  --muted: #6b7280;
+  --card: #f9fafb;
+  --border: #e5e7eb;
+  --accent: #4f46e5;
+  --on-accent: #fff;
+  --danger: #b91c1c;
+  --ok: #15803d;
+  --warn: #a16207;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0b0f;
+    --fg: #e5e7eb;
+    --muted: #9ca3af;
+    --card: #111827;
+    --border: #374151;
+    --accent: #818cf8;
+    /* White on the light indigo is under 3:1; dark text is over 7:1. */
+    --on-accent: #0b0b0f;
+    --danger: #f87171;
+    --ok: #22c55e;
+    --warn: #facc15;
+  }
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.pagehead {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin: 16px 0;
+  background: var(--card);
+}
+
+/* A link and a summary are content-box and keep the page's font, a button is
+   border-box in its own; without both lines they'd differ in size and face. */
+button, a.button, summary.button {
+  box-sizing: border-box;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--fg);
+  font-size: 1rem;
+  cursor: pointer;
+  text-decoration: none;
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+button.primary, a.button.primary, summary.button.primary {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+}
+
+button.danger, a.button.danger, summary.button.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+button.small, a.button.small, summary.button.small {
+  padding: 4px 10px;
+  min-height: 32px;
+  font-size: .9rem;
+}
+
+summary.button {
+  list-style: none;
+}
+
+summary.button::-webkit-details-marker {
+  display: none;
+}
+
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.headactions, .keyactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.headactions form, .keyactions form {
+  display: inline;
+}
+
+.keyactions {
+  margin-top: 8px;
+}
+
+/* An open Replace or confirm takes the whole row, so its paste box is the
+   card's width; the buttons after it follow below, in the same order. */
+.keyactions details[open] {
+  flex: 1 1 100%;
+}
+
+.badge {
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: .9rem;
+  border: 1px solid var(--border);
+}
+
+.badge.state-running, .badge.set {
+  color: var(--ok);
+}
+
+.badge.state-backing-off, .badge.state-trust-asked {
+  color: var(--warn);
+}
+
+.badge.state-stopped, .badge.state-signed-out, .badge.unset {
+  color: var(--muted);
+}
+
+.terminal {
+  height: 50vh;
+  min-height: 240px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0b0b0f;
+}
+
+ul.keys {
+  list-style: none;
+  padding: 0;
+}
+
+li.key {
+  border-top: 1px solid var(--border);
+  padding: 12px 0;
+}
+
+.keyhead {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.detail {
+  overflow-wrap: anywhere;
+}
+
+details[open] > form, details > p {
+  margin-top: 8px;
+}
+
+textarea, input, select {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 1rem;
+}
+
+textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+label {
+  display: block;
+  margin: 10px 0 4px;
+  font-weight: 600;
+}
+
+form > button {
+  margin-top: 10px;
+}
+
+.headactions form > button, .keyactions form > button {
+  margin-top: 0;
+}
+
+/* Where the Copy fallback puts the text it selects. */
+.offscreen {
+  position: absolute;
+  left: -9999px;
+}
+
+.who, .hint, td small {
+  color: var(--muted);
+}
+
+td small {
+  display: block;
+}
+
+.callout {
+  border-left: 4px solid var(--warn);
+  padding: 10px 14px;
+  margin-top: 12px;
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+table.env {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+/* The action column takes only what its button needs, so a long value can't
+   squeeze it until "Remove" breaks in two. */
+table.env td:last-child {
+  width: 1%;
+}
+
+table.env td, table.env th {
+  text-align: left;
+  padding: 6px;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.flash, .error {
+  padding: 10px 14px;
+  border-radius: 8px;
+}
+
+.flash {
+  border-left: 4px solid var(--ok);
+}
+
+.error {
+  border-left: 4px solid var(--danger);
+}
+
+@media (max-width: 600px) {
+  table.env, table.env thead, table.env tbody, table.env tr, table.env td {
+    display: block;
+  }
+
+  table.env thead {
+    display: none;
+  }
+
+  table.env td:last-child {
+    width: auto;
+  }
+
+  .pagehead {
+    flex-direction: column;
+  }
+}
