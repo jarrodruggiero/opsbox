@@ -132,4 +132,6 @@ class Sessions:
             return False
         if not self.valid(token):
             return False
-        return hmac.compare_digest(self.csrf(token), value)
+        # As bytes: compare_digest raises on a str with any non-ASCII
+        # character, and the form field is whatever the request sent.
+        return hmac.compare_digest(self.csrf(token).encode(), value.encode())
