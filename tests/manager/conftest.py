@@ -42,3 +42,13 @@ def fake_claude(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> path
 
     monkeypatch.setattr(opsbox.manager.claude, "CLAUDE", str(wrapper))
     return wrapper
+
+
+@pytest.fixture
+def box(tmp_path: pathlib.Path, fake_claude: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+    """A manager served on a free port, signed out, with a fake claude, a fake gh and a stub Remote Control."""
+    # Imported here: it imports opsbox.manager, which is only importable once
+    # the path above is set.
+    import webtest
+
+    yield from webtest.serve_box(tmp_path, monkeypatch)
