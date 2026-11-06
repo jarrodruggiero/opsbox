@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import time
+from pathlib import Path
 
 from .ptyproc import PtyProcess
 
@@ -53,8 +54,10 @@ def _env(config_dir: str | None) -> dict[str, str]:
 
 def auth_status(config_dir: str | None = None, claude: str | None = None) -> dict:
     """Run `claude auth status` and return the parsed JSON output."""
-    # Any failure reads as signed out: a missing binary, a hang or garbage must
-    # never take down the supervisor loop that calls this.
+    # A failure is never an answer: a missing binary, a hang or garbage gives a
+    # status with "error" set, which identity() reads as no account and
+    # problem() names. Callers that decide something from "signed out", such
+    # as whose sign-in a new one becomes, must refuse on it instead.
     try:
         result = subprocess.run(
             [claude or CLAUDE, "auth", "status"],
@@ -64,9 +67,16 @@ def auth_status(config_dir: str | None = None, claude: str | None = None) -> dic
             timeout=30,
         )
         status = json.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return {"loggedIn": False, "authMethod": "none"}
-    return status if isinstance(status, dict) else {"loggedIn": False, "authMethod": "none"}
+    except subprocess.TimeoutExpired:
+        return {"loggedIn": False, "authMethod": "none", "error": "claude auth status took too long"}
+    except (OSError, subprocess.SubprocessError) as failed:
+        return {"loggedIn": False, "authMethod": "none", "error": f"claude auth status failed: {failed.__class__.__name__}"}
+    except ValueError:
+        return {"loggedIn": False, "authMethod": "none", "error": "claude auth status printed something unexpected"}
+    if not isinstance(status, dict):
+        return {"loggedIn": False, "authMethod": "none", "error": "claude auth status printed something unexpected"}
+    status.pop("error", None)
+    return status
 
 
 def identity(status: dict) -> tuple[str, str] | None:
@@ -87,14 +97,19 @@ def identity(status: dict) -> tuple[str, str] | None:
     return None
 
 
-def problem(status: dict) -> str | None:
+def problem(status: dict, owner: tuple[str, str] | None = None) -> str | None:
     """What stops this sign-in starting Remote Control, in words, or None.
 
     Only a claude.ai sign-in with no API key beside it can start it. Anything
     else makes `claude remote-control` exit at once, and the supervisor would
     restart it in a loop without ever saying why. The words match the
     entrypoint's, which says the same for the remote-control command.
+
+    With *owner*, the account the box belongs to, any other account is a
+    problem too: Remote Control would run its sessions with this box's keys.
     """
+    if status.get("error"):
+        return f"couldn't check the sign-in ({status['error']}); trying again"
     if status.get("loggedIn") is not True:
         return "not signed in to Claude yet: sign in on the manager page"
     if status.get("authMethod") == "claude.ai" and status.get("apiKeySource", "none") not in (None, "none"):
@@ -103,7 +118,19 @@ def problem(status: dict) -> str | None:
     if identity(status) is None:
         return (f"signed in with {status.get('authMethod') or 'an unknown method'}, which can't start "
                 "Remote Control; it needs a claude.ai sign-in")
+    if owner is not None and identity(status) != owner:
+        return (f"signed in as {status['email']}, which isn't this box's account ({owner[0]}); "
+                "sign the box out on the manager page")
     return None
+
+
+def read_owner(path: Path) -> tuple[str, str] | None:
+    """The (email, orgId) the box belongs to, or None before its first sign-in."""
+    try:
+        data = json.loads(path.read_text())
+        return (data["email"], data["orgId"]) if isinstance(data, dict) else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def logout(config_dir: str | None = None, claude: str | None = None) -> None:

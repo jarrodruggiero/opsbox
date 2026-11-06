@@ -95,11 +95,20 @@ class TestClaude:
         assert claude.identity({"loggedIn": True, "authMethod": "api_key", "email": "x", "orgId": "y"}) is None
         assert claude.identity({"loggedIn": False}) is None
 
-    def test_auth_status_survives_garbage(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """When the claude binary fails, auth_status returns a safe default."""
-        monkeypatch.setattr(claude, "CLAUDE", "/bin/false")
+    @pytest.mark.parametrize("output", [None, "garbage", "[1, 2]"], ids=["missing", "garbage", "not-an-object"])
+    def test_a_failed_status_is_an_error_not_signed_out(self, output, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+        """A status that couldn't be read says so; deciding "signed out" from it would let a sign-in run over the box's own."""
+        if output is None:
+            monkeypatch.setattr(claude, "CLAUDE", str(tmp_path / "missing"))
+        else:
+            fake = tmp_path / "claude"
+            fake.write_text(f"#!/bin/sh\necho '{output}'\n")
+            fake.chmod(0o755)
+            monkeypatch.setattr(claude, "CLAUDE", str(fake))
         result = claude.auth_status()
-        assert result == {"loggedIn": False, "authMethod": "none"}
+        assert result["loggedIn"] is False and result["error"]
+        assert claude.identity(result) is None
+        assert claude.problem(result).startswith("couldn't check the sign-in")
 
 
 class TestLoginFlow:
@@ -168,3 +177,18 @@ def test_problem_names_what_stops_remote_control() -> None:
     assert "not signed in" in claude.problem({"loggedIn": False, "authMethod": "none"})
     assert "(ANTHROPIC_API_KEY)" in claude.problem({**ok, "apiKeySource": "ANTHROPIC_API_KEY"})
     assert "signed in with api_key" in claude.problem({"loggedIn": True, "authMethod": "api_key"})
+
+
+def test_a_failed_start_leaks_no_descriptors(tmp_path: pathlib.Path) -> None:
+    """A start that fails (no such directory) closes the pty pair it opened; a supervisor retrying it must not run out of fds."""
+    import os
+
+    def open_fds() -> int:
+        return len(os.listdir("/dev/fd"))
+
+    before = open_fds()
+    for _ in range(20):
+        proc = ptyproc.PtyProcess(["/bin/sh", "-c", "true"], env={}, cwd=str(tmp_path / "missing"))
+        with pytest.raises(OSError):
+            proc.start()
+    assert open_fds() <= before + 1

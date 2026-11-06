@@ -40,17 +40,23 @@ class PtyProcess:
     def start(self) -> None:
         """Start the process in a pseudo-terminal with the configured window size."""
         master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", self._rows, self._cols, 0, 0))
-        self.proc = subprocess.Popen(
-            self._argv,
-            stdin=slave,
-            stdout=slave,
-            stderr=slave,
-            env=self._env,
-            cwd=self._cwd,
-            start_new_session=True,
-            close_fds=True,
-        )
+        try:
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", self._rows, self._cols, 0, 0))
+            self.proc = subprocess.Popen(
+                self._argv,
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                env=self._env,
+                cwd=self._cwd,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except BaseException:
+            # A failed start (no such directory or program) must not leak the pair.
+            os.close(master)
+            os.close(slave)
+            raise
         os.close(slave)
         self._fd = master
         t = threading.Thread(target=self._read_loop, daemon=True)
@@ -98,7 +104,8 @@ class PtyProcess:
     def write(self, data: bytes) -> None:
         """Write data to the pseudo-terminal stdin."""
         if not self.running():
-            raise RuntimeError("not running")
+            # OSError, as a write to a closed pty would raise, so one except covers both.
+            raise OSError("the process has exited")
         os.write(self._fd, data)
 
     def running(self) -> bool:

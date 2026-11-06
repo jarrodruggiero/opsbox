@@ -86,7 +86,10 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet --require-hashes -r requirements-dev.txt
-          "$RUNNER_TEMP/venv/bin/python" -m pytest -q tests
+          # Not the page's layout tests: a Chrome or font change on the runner
+          # must not hold back a release, the weekly security rebuild included.
+          # CI runs them on every pull request.
+          "$RUNNER_TEMP/venv/bin/python" -m pytest -q tests --ignore=tests/manager/test_visual.py
       - name: Plan
         id: plan
         run: |

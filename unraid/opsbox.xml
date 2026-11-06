@@ -58,6 +58,10 @@
           Description="The prefix of each session's name in the Claude app."
           Type="Variable" Display="advanced" Required="false" Mask="false">opsbox</Config>
 
+  <Config Name="Manager page" Target="8080" Default="8080" Mode="tcp"
+          Description="The manager page's port on the host, for bridge networking. On br0 the page is on the container's own address, port 8080, and this is ignored."
+          Type="Port" Display="always" Required="false" Mask="false">8080</Config>
+
   <Config Name="Manager host names" Target="OPSBOX_MANAGER_HOSTS" Default=""
           Description="Names the manager page answers to besides IP addresses, comma-separated (for example opsbox.home). It refuses any other name, which stops DNS rebinding."
           Type="Variable" Display="advanced" Required="false" Mask="false"></Config>

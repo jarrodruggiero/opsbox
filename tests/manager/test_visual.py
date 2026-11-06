@@ -14,6 +14,7 @@ the probe come from Stocktake's tests/test_visual.py.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -53,6 +54,10 @@ def find_chrome() -> str | None:
 
 
 CHROME = find_chrome()
+# CI sets OPSBOX_REQUIRE_BROWSER, so a runner without Chrome fails rather than
+# skipping every layout test in silence.
+if CHROME is None and os.environ.get("OPSBOX_REQUIRE_BROWSER"):
+    raise RuntimeError("OPSBOX_REQUIRE_BROWSER is set but there is no Chrome")
 pytestmark = pytest.mark.skipif(CHROME is None, reason="no headless Chrome on this machine")
 
 # 1400 is a desktop; 412 is a Pixel-class phone in CSS pixels.
@@ -204,3 +209,83 @@ def test_the_probe_can_fail() -> None:
     html = standalone(context()).replace("</main>", '<div class="detail">' + "x" * 400 + "</div></main>")
     html = html.replace("</head>", "<style>.detail{overflow-wrap:normal !important;white-space:nowrap}</style></head>")
     assert probe(html, WIDTHS["phone"]), "the probe found nothing wrong with an over-wide page"
+
+
+UI = ROOT / "ui/node_modules"
+VENDORED = {
+    "xterm.js": UI / "@xterm/xterm/lib/xterm.js",
+    "xterm.css": UI / "@xterm/xterm/css/xterm.css",
+    "xterm-addon-fit.js": UI / "@xterm/addon-fit/lib/addon-fit.js",
+}
+
+
+def test_the_terminal_runs_under_the_real_csp(tmp_path: Path) -> None:
+    """The console's terminal, with the real scripts under the real Content-Security-Policy.
+
+    The layout tests strip the scripts, so they can't see this: the first CSP
+    blocked the <style> elements xterm.js writes, and the console lost its
+    colours and its monospace columns. Needs the terminal vendored into
+    ui/node_modules (`npm ci --ignore-scripts` in ui/), as CI does.
+    """
+    import base64
+    import http.server
+    import threading
+
+    from opsbox.manager import web
+
+    missing = [name for name, path in VENDORED.items() if not path.is_file()]
+    if missing:
+        if os.environ.get("OPSBOX_REQUIRE_BROWSER"):
+            pytest.fail(f"the terminal isn't vendored ({', '.join(missing)}): run npm ci --ignore-scripts in ui/")
+        pytest.skip("the terminal isn't vendored into ui/node_modules")
+    files = {name: path.read_bytes() for name, path in VENDORED.items()}
+    for name in ("manager.css", "manager.js"):
+        files[name] = (STATIC / name).read_bytes()
+    files["csp_probe.js"] = (Path(__file__).parent / "csp_probe.js").read_bytes()
+    page = render.page(context()).replace("</body>", '<script src="/static/csp_probe.js"></script></body>').encode()
+    greeting = base64.b64encode(b"\x1b[32mhello from the console\x1b[0m\r\n").decode()
+
+    class Serve(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            name = self.path.removeprefix("/static/")
+            if self.path == "/":
+                body, kind = page, "text/html; charset=utf-8"
+            elif self.path.startswith("/static/") and name in files:
+                body, kind = files[name], ("text/css" if name.endswith(".css") else "text/javascript")
+            elif self.path == "/console":
+                body, kind = f"event: reset\ndata: {greeting}\n\nretry: 600000\n\n".encode(), "text/event-stream"
+            else:
+                # The state the page was rendered in, or manager.js reloads it.
+                body, kind = json.dumps({"rc": {"state": "running"}, "login": {"active": False}}).encode(), "application/json"
+            self.send_response(200)
+            for header, value in web.SECURITY_HEADERS.items():
+                self.send_header(header, value)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Serve)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        out = subprocess.run(
+            # Frames advance with virtual time only when every compositor stage
+            # runs before a draw; without it Chrome runs almost no animation
+            # frames, and xterm paints in them.
+            [CHROME, "--headless", "--disable-gpu", "--dump-dom", "--no-sandbox", "--window-size=1200,900",
+             "--run-all-compositor-stages-before-draw", "--virtual-time-budget=8000",
+             f"http://127.0.0.1:{server.server_address[1]}/"],
+            capture_output=True, text=True, timeout=90,
+        ).stdout
+    finally:
+        server.shutdown()
+        server.server_close()
+    marker = out.find("VC{")
+    assert marker >= 0, "the probe did not run"
+    report = json.loads(unescape(out[marker + 2:out.find("</title>", marker)]))
+    assert report["violations"] == [], report["violations"]
+    assert report["rows"] and "hello from the console" in report["rows"]
+    assert "mono" in report["font"].lower() or "courier" in report["font"].lower(), report["font"]

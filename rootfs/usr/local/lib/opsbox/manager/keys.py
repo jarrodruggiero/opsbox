@@ -23,11 +23,23 @@ import json
 import os
 import re
 import subprocess
+import threading
 from pathlib import Path
 
 import yaml
 
 from opsbox.manager.sessions import _write_private
+
+
+# By full path: PATH starts with ~/.local/bin, which lives in the volume, so
+# anything planted there would otherwise be handed the GitHub token on stdin.
+# Tests point these at fakes.
+GH = "/usr/bin/gh"
+SSH_KEYGEN = "/usr/bin/ssh-keygen"
+
+# Two saves at once would each read the file, and the second write would
+# drop the first one's change.
+_ENV_LOCK = threading.Lock()
 
 
 class KeyError_(ValueError):
@@ -75,7 +87,7 @@ def set_key(key_id: str, value: str) -> None:
     elif key_id == "github":
         try:
             proc = subprocess.run(
-                ["gh", "auth", "login", "--hostname", "github.com", "--with-token"],
+                [GH, "auth", "login", "--hostname", "github.com", "--with-token"],
                 input=value,
                 text=True,
                 capture_output=True,
@@ -133,7 +145,7 @@ def generate_ssh() -> None:
     ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
         subprocess.run(
-            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "opsbox", "-f", str(key_path)],
+            [SSH_KEYGEN, "-q", "-t", "ed25519", "-N", "", "-C", "opsbox", "-f", str(key_path)],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             check=True,
@@ -156,7 +168,7 @@ def remove_key(key_id: str) -> None:
     elif key_id == "github":
         try:
             subprocess.run(
-                ["gh", "auth", "logout", "--hostname", "github.com"],
+                [GH, "auth", "logout", "--hostname", "github.com"],
                 capture_output=True,
                 check=False,
                 timeout=30,
@@ -208,7 +220,7 @@ def describe(key_id: str) -> dict:
         # gh keeps its own token, so whether it's set is whatever gh says.
         try:
             proc = subprocess.run(
-                ["gh", "auth", "status", "--hostname", "github.com"],
+                [GH, "auth", "status", "--hostname", "github.com"],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -231,7 +243,7 @@ def describe(key_id: str) -> dict:
             info["public"] = pub_path.read_text().strip()
             try:
                 fp_proc = subprocess.run(
-                    ["ssh-keygen", "-lf", str(pub_path)],
+                    [SSH_KEYGEN, "-lf", str(pub_path)],
                     capture_output=True,
                     text=True,
                     timeout=30,
@@ -304,9 +316,10 @@ def set_env(name: str, value: str) -> None:
 
 def _write_env(name: str, value: str) -> None:
     """Set or (when *value* is empty) remove one name, keeping every other line, managed names included."""
-    env_file = env_path()
-    lines = env_file.read_text().splitlines() if env_file.exists() else []
-    lines = [line for line in lines if not line.startswith(name + "=")]
-    if value:
-        lines.append(f"{name}={value}")
-    _write_private(env_file, "".join(line + "\n" for line in lines))
+    with _ENV_LOCK:
+        env_file = env_path()
+        lines = env_file.read_text().splitlines() if env_file.exists() else []
+        lines = [line for line in lines if not line.startswith(name + "=")]
+        if value:
+            lines.append(f"{name}={value}")
+        _write_private(env_file, "".join(line + "\n" for line in lines))

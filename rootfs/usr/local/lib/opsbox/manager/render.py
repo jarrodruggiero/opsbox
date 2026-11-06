@@ -116,7 +116,7 @@ def _signin_section(ctx: dict) -> str:
         parts.append("</form>")
 
     else:
-        if box.get("loggedIn"):
+        if box.get("loggedIn") or box.get("owned"):
             parts.append('<p>Sign in with the Claude account this box uses.</p>')
         else:
             parts.append('<p>Sign in to set up this box.</p>')
@@ -327,7 +327,7 @@ def _claude_section(ctx: dict) -> str:
     parts = ['<section class="card" id="claude"><h2>Claude</h2>']
     parts.append('<details class="confirm">')
     parts.append('<summary class="button danger">Sign the box out</summary>')
-    parts.append('<p>Sign the box out of Claude? Remote Control stops, and every browser is signed out. The keys are kept.</p>')
+    parts.append('<p>Sign the box out of Claude? Remote Control stops, and every browser is signed out. The keys are kept, and only this account can sign it back in.</p>')
     parts.append('<form method="post" action="/box/signout">' + csrf_field(ctx))
     parts.append('<button class="danger">Sign the box out</button>')
     parts.append("</form>")

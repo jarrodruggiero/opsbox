@@ -5,6 +5,9 @@ import base64
 import http.client
 import json
 import os
+import pathlib
+import socket
+import time
 
 import pytest
 from webtest import Browser, context_of, raw, sign_in
@@ -117,7 +120,7 @@ def test_signed_out_page_says_nothing_about_the_box(box) -> None:
     stranger = Browser(box.port)
     ctx = stranger.ctx()
     assert ctx["session"] is False
-    assert ctx["box"] == {"loggedIn": True}
+    assert ctx["box"] == {"loggedIn": True, "owned": True}
     assert ctx["rc"] == {} and ctx["keys"] == [] and ctx["env"] == {} and ctx["browsers"] == []
     assert ctx["csrf"] == stranger.cookies[web.PRESESSION_COOKIE]
     assert "me@example.com" not in json.dumps(ctx)
@@ -270,7 +273,7 @@ def test_signouts(box) -> None:
     # The other browser kept its cookie, and the session behind it is gone.
     assert web.SESSION_COOKIE in second.cookies
     assert second.get("/api/status").status == 401
-    assert first.ctx()["box"] == {"loggedIn": False}
+    assert first.ctx()["box"] == {"loggedIn": False, "owned": True}
 
 
 def test_an_unexpected_error_is_a_plain_500(box, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -291,9 +294,122 @@ def test_an_unexpected_error_is_a_plain_500(box, monkeypatch: pytest.MonkeyPatch
 
 def test_no_signin_left_behind_when_claude_is_missing(box, monkeypatch: pytest.MonkeyPatch) -> None:
     """If claude can't start, the page says so and no half-started sign-in is left recorded."""
+    # A clean "signed out", so the sign-in itself is what fails to start.
+    monkeypatch.setattr(claude, "auth_status", lambda **kwargs: {"loggedIn": False, "authMethod": "none"})
     monkeypatch.setattr(claude, "CLAUDE", os.devnull + "/missing")
     browser = Browser(box.port)
     resp = browser.post("/signin/start", {"csrf": browser.csrf()})
     assert resp.status == 400
     assert "sign-in link" in context_of(resp)["error"]
+    assert box.manager.login is None
+
+
+def test_an_unreadable_status_refuses_a_sign_in(box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A status that couldn't be read is never "signed out": a box sign-in then would run over the box's own."""
+    monkeypatch.setattr(claude, "auth_status", lambda **kwargs: {"loggedIn": False, "authMethod": "none", "error": "took too long"})
+    browser = Browser(box.port)
+    resp = browser.post("/signin/start", {"csrf": browser.csrf()})
+    assert resp.status == 400
+    assert "Couldn't check" in context_of(resp)["error"]
+    assert box.manager.login is None
+
+
+def test_the_box_stays_its_owners_after_a_sign_out(box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Signing the box out doesn't hand it, and its keys, to the next account that signs in."""
+    owner = Browser(box.port)
+    assert sign_in(owner).status == 303
+    assert owner.post("/box/signout", {"csrf": owner.csrf()}).status == 303
+
+    monkeypatch.setenv("FAKE_CLAUDE_EMAIL", "other@example.com")
+    stranger = Browser(box.port)
+    resp = sign_in(stranger)
+    assert resp.status == 403
+    assert "different Claude account" in context_of(resp)["error"]
+    assert web.SESSION_COOKIE not in stranger.cookies
+    # Signed straight back out, and still the owner's.
+    assert claude.auth_status()["loggedIn"] is False
+    assert box.manager.owner() == ("me@example.com", "org-1")
+
+    monkeypatch.setenv("FAKE_CLAUDE_EMAIL", "me@example.com")
+    assert sign_in(owner).status == 303
+    assert claude.identity(claude.auth_status()) == ("me@example.com", "org-1")
+
+
+def test_a_box_signed_in_before_the_manager_is_adopted(box) -> None:
+    """Upgrading from the CLI sign-in: the account already on the box becomes its owner, not the next visitor."""
+    (pathlib.Path(os.environ["FAKE_CLAUDE_HOME"]) / "signed-in").write_text("me@example.com")
+    assert Browser(box.port).ctx()["box"] == {"loggedIn": True, "owned": True}
+    assert box.manager.owner() == ("me@example.com", "org-1")
+
+
+def test_restart_with_nothing_running_says_so(box) -> None:
+    """Restart while stopped changes nothing, and the page says why rather than "Restarted."."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    box.rc.running = False
+    resp = browser.post("/rc/restart", {"csrf": browser.csrf()})
+    assert resp.status == 400
+    assert "nothing to restart" in context_of(resp)["error"]
+
+
+def test_a_signed_out_browsers_console_stops(box) -> None:
+    """An open console ends within seconds of its session being signed out, so a revoked session stops seeing output."""
+    browser, other = Browser(box.port), Browser(box.port)
+    assert sign_in(browser).status == 303 and sign_in(other).status == 303
+    conn = http.client.HTTPConnection("127.0.0.1", box.port, timeout=10)
+    cookie = "; ".join(f"{name}={value}" for name, value in browser.cookies.items())
+    conn.request("GET", "/console", headers={"Host": "127.0.0.1", "Cookie": cookie})
+    resp = conn.getresponse()
+    try:
+        assert resp.status == 200
+        assert other.post("/browsers/signout-all", {"csrf": other.csrf()}).status == 303
+        time.sleep(1.2)
+        box.console.feed(b"after the sign-out")
+        rest = resp.read()
+        assert b"after the sign-out" not in base64.b64decode(b"".join(
+            line[len(b"data: "):] for line in rest.split(b"\n") if line.startswith(b"data: ")) or b"")
+    finally:
+        conn.close()
+
+
+def test_an_idle_connection_is_dropped(box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A connection that sends nothing is closed, so idle sockets from one host can't hold every thread."""
+    # The shipped value, then a short one so the test needn't wait for it.
+    assert web.Handler.timeout is not None and 15 < web.Handler.timeout <= 60
+    monkeypatch.setattr(web.Handler, "timeout", 1)
+    with socket.create_connection(("127.0.0.1", box.port), timeout=10) as sock:
+        started = time.monotonic()
+        assert sock.recv(1) == b""
+        assert time.monotonic() - started < 5
+
+
+def test_host_names_ignore_case_and_spaces(tmp_path: pathlib.Path) -> None:
+    """OPSBOX_MANAGER_HOSTS as typed (" OpsBox.Home, b.home") matches the names browsers send."""
+    manager = web.Manager(home=tmp_path, rc=None, console=None, sessions=None, render=None, static_dir=tmp_path,
+                          hosts=[" OpsBox.Home", " b.home ", ""])
+    assert manager.hosts == ["opsbox.home", "b.home"]
+
+
+def test_stale_signins_are_cleared(box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Throwaway sign-ins a crash left in the volume are logged out and deleted at startup."""
+    log = box.home.parent / "claude.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    leftover = box.manager.signin_dir / "tmpleft"
+    leftover.mkdir(parents=True)
+    (leftover / "signed-in").write_text("me@example.com")
+    box.manager.clear_stale_signins()
+    assert list(box.manager.signin_dir.iterdir()) == []
+    assert f"logout {leftover}" in log.read_text()
+
+
+def test_a_code_after_the_cli_has_gone_says_start_again(box) -> None:
+    """If claude auth login has already exited, pasting a code ends that sign-in with a reason, not a 500."""
+    browser = Browser(box.port)
+    pre = browser.csrf()
+    assert browser.post("/signin/start", {"csrf": pre}).status == 303
+    box.manager.login.cancel()
+    box.manager.login.proc.wait(10)
+    resp = browser.post("/signin/code", {"csrf": pre, "code": "good-code-123"})
+    assert resp.status == 400
+    assert "has ended" in context_of(resp)["error"]
     assert box.manager.login is None

@@ -177,12 +177,14 @@ USER root
 # either.
 #
 # Interactive shells (`docker exec -it opsbox bash`) start with the same
-# umask the entrypoint sets, so what they write is private too.
+# umask the entrypoint sets, so what they write is private too, and with the
+# settings from the manager page.
 RUN set -eu; \
     install -D -m 0644 /tmp/versions.txt /usr/local/share/opsbox/versions.txt; \
     find /tmp /var/tmp -mindepth 1 -delete; \
     find / -xdev -perm /6000 -type f -exec chmod a-s {} +; \
-    echo 'umask 077' >> /etc/bash.bashrc
+    echo 'umask 077' >> /etc/bash.bashrc; \
+    echo '. /usr/local/lib/opsbox/env.sh' >> /etc/bash.bashrc
 
 # mise's shims come before the baked tools, so a repository that pins a
 # version in .mise.toml gets that version once someone has run `mise trust`

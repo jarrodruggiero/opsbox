@@ -27,9 +27,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The browser tests run the page's real terminal, from the same lockfile
+      # the image vendors it from.
+      - name: Vendor the terminal
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefix ui
       # tests/test_image.py skips itself here: it needs OPSBOX_IMAGE, which
-      # only the image job sets.
+      # only the image job sets. The browser tests must not skip: the runner
+      # has Chrome, and a skip would pass in silence.
       - name: Run the tests
+        env:
+          OPSBOX_REQUIRE_BROWSER: "1"
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet --require-hashes -r requirements-dev.txt

@@ -250,3 +250,70 @@ def test_an_api_key_beside_the_sign_in_is_named_not_looped(rc, monkeypatch):
     monkeypatch.delenv("FAKE_API_KEY_SOURCE")
     rc._wake.set()
     until(lambda: rc.status()["state"] == "running")
+
+
+def test_remote_control_never_runs_as_another_account(rc, tmp_path):
+    """Signed in as anyone but the box's owner, Remote Control waits and says why: it would run with this box's keys."""
+    owner = tmp_path / "owner"
+    owner.write_text('{"email": "owner@example.com", "orgId": "org-1"}')
+    rc.owner_file = owner
+    rc.start()
+    until(lambda: b"isn't this box's account (owner@example.com)" in rc.console.output())
+    assert rc.status()["state"] == "signed-out"
+    assert b"starting Remote Control" not in rc.console.output()
+
+    owner.write_text('{"email": "test@example.com", "orgId": "org-1"}')
+    rc._wake.set()
+    until(lambda: rc.status()["state"] == "running")
+
+
+def test_a_stop_during_the_sign_in_check_is_kept(rc, monkeypatch):
+    """Stop clicked while the loop is checking the sign-in must not be followed by a start."""
+    from opsbox.manager import claude as claude_module
+
+    real = claude_module.auth_status
+
+    def stopped_meanwhile(**kwargs):
+        status = real(**kwargs)
+        rc.stop()
+        return status
+
+    monkeypatch.setattr(claude_module, "auth_status", stopped_meanwhile)
+    rc.start()
+    until(lambda: not rc._thread.is_alive())
+    assert rc.status()["state"] == "stopped"
+    assert rc.status()["pid"] is None
+    assert b"starting Remote Control" not in rc.console.output()
+
+
+def test_a_failed_start_backs_off_and_says_why(setup_sign_in, fake_claude, tmp_path):
+    """If the process can't start (its directory is a file now), the loop says so and tries again, rather than dying."""
+    blocker = tmp_path / "workdir"
+    blocker.write_text("a file where the directory was")
+    rc = RemoteControl(Console(), workdir=str(blocker), args=[], env_file=tmp_path / "env",
+                       claude=str(fake_claude), backoff_max=0.3)
+    try:
+        rc.start()
+        until(lambda: b"couldn't start Remote Control" in rc.console.output())
+        assert rc._thread.is_alive()
+        blocker.unlink()
+        until(lambda: rc.status()["state"] == "running")
+        assert rc.console.output().count(b"couldn't start Remote Control") == 1
+    finally:
+        rc.stop()
+
+
+def test_restart_with_nothing_running_changes_nothing(rc):
+    """Restart while stopped returns False and leaves no flag behind to skip the next crash's backoff."""
+    assert rc.restart() is False
+    assert rc._restart_now is False
+
+
+def test_a_viewer_that_falls_behind_is_dropped():
+    """A console viewer that stops reading is dropped at its limit, rather than growing without bound."""
+    console = Console()
+    _, q = console.attach(limit=2)
+    for chunk in (b"a", b"b", b"c"):
+        console.feed(chunk)
+    assert console.subscribed(q) is False
+    assert console.output() == b"abc"
