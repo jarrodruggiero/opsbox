@@ -101,6 +101,7 @@ class RemoteControl:
     ) -> None:
         self.console = console
         self.workdir = workdir
+        self._problem: str | None = None
         self.args = args
         self.env_file = env_file
         self.claude = claude
@@ -182,13 +183,19 @@ class RemoteControl:
                 if not self._want:
                     break
 
-            # a. Check auth status.
-            if claude.identity(claude.auth_status(claude=self.claude)) is None:
+            # a. Check the sign-in can start Remote Control, and say why not once
+            # per reason, not every 5 seconds.
+            problem = claude.problem(claude.auth_status(claude=self.claude))
+            if problem is not None:
                 with self._lock:
                     self.state = "signed-out"
+                if problem != self._problem:
+                    self.console.note(problem)
+                self._problem = problem
                 self._wake.wait(timeout=5.0)
                 self._wake.clear()
                 continue
+            self._problem = None
 
             # b. Build env and start the process.
             env = dict(os.environ)

@@ -158,3 +158,13 @@ class TestLoginFlow:
         # Config dir B should not see the sign-in.
         status = claude.auth_status(config_dir=str(cfg_b))
         assert status["loggedIn"] is False
+
+
+def test_problem_names_what_stops_remote_control() -> None:
+    """Only a claude.ai sign-in with no API key beside it can start Remote Control; anything else says why."""
+    ok = {"loggedIn": True, "authMethod": "claude.ai", "email": "me@example.com", "orgId": "org-1", "apiKeySource": "none"}
+    assert claude.problem(ok) is None
+    assert claude.problem({k: v for k, v in ok.items() if k != "apiKeySource"}) is None
+    assert "not signed in" in claude.problem({"loggedIn": False, "authMethod": "none"})
+    assert "(ANTHROPIC_API_KEY)" in claude.problem({**ok, "apiKeySource": "ANTHROPIC_API_KEY"})
+    assert "signed in with api_key" in claude.problem({"loggedIn": True, "authMethod": "api_key"})
