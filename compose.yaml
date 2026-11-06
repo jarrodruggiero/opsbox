@@ -2,12 +2,9 @@
 #
 #   mkdir -m 0700 home && sudo chown 1000:1000 home
 #   docker compose up -d
-#   docker exec -it opsbox claude auth login      # once: sign in
-#   docker attach opsbox                          # once: the trust question
 #
-# `docker attach` doesn't replay what was printed before it, so the question
-# (visible in `docker logs opsbox`) is already waiting: type y and Enter, then
-# detach with Ctrl-P Ctrl-Q.
+# Then open http://<this machine>:8080/ to sign in to Claude and answer the
+# trust question (once each); see the README.
 #
 # Everything personal lives in ./home: Claude Code's sign-in and settings, SSH
 # keys, kubeconfig, talosconfig, gh's token, and the repositories you clone
@@ -25,11 +22,16 @@ services:
     # without it the hostname is the container's ID, which changes on every
     # `up` after a pull.
     hostname: opsbox
+    # The manager restarts Remote Control itself; this restarts the manager.
     restart: unless-stopped
-    # `claude remote-control` waits at a terminal; these let `docker attach`
-    # reach it.
-    tty: true
-    stdin_open: true
+    # The manager page, plain HTTP. On anything but a trusted LAN, put HTTPS in
+    # front of it and publish it on 127.0.0.1 only ("127.0.0.1:8080:8080").
+    ports:
+      - "8080:8080"
+    # For the `remote-control` command (Remote Control without the page),
+    # uncomment these, so `docker attach` can reach its trust question:
+    # tty: true
+    # stdin_open: true
     volumes:
       - ./home:/home/opsbox
     # Nothing in the image needs a capability, a setuid binary, or to write
@@ -48,4 +50,5 @@ services:
     # machine the engine runs on. Point the CLI at the VM over SSH, with a key
     # from ./home/.ssh:
     # environment:
-    #   DOCKER_HOST: ssh://builder@build-vm
+    #   DOCKER_HOST: ssh://builder@build-vm   # or set it on the manager page
+    #   OPSBOX_MANAGER_HOSTS: opsbox.home     # names the page answers to, besides IPs

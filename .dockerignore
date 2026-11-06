@@ -2,4 +2,6 @@
 # local test run left behind.
 *
 !rootfs/
+!ui/package.json
+!ui/package-lock.json
 **/__pycache__
