@@ -1,3 +1,6 @@
 __pycache__/
 .pytest_cache/
 .venv/
+
+# The terminal vendored for the browser test; the image build vendors its own.
+ui/node_modules/

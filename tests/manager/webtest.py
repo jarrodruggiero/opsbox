@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import http.client
 import json
-import os
 import pathlib
 import re
 import socket
@@ -13,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from opsbox.manager import web
+from opsbox.manager import keys, web
 from opsbox.manager.sessions import Sessions
 from opsbox.manager.supervisor import Console
 
@@ -24,6 +23,7 @@ class StubRC:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.trust_asked = False
+        self.running = True
 
     def start(self) -> None:
         self.calls.append("start")
@@ -31,8 +31,9 @@ class StubRC:
     def stop(self) -> None:
         self.calls.append("stop")
 
-    def restart(self) -> None:
+    def restart(self) -> bool:
         self.calls.append("restart")
+        return self.running
 
     def answer_trust(self) -> bool:
         self.calls.append("trust")
@@ -122,7 +123,7 @@ def serve_box(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, render=re
     bin_dir.mkdir()
     (bin_dir / "gh").write_text(FAKE_GH)
     (bin_dir / "gh").chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(keys, "GH", str(bin_dir / "gh"))
     for name in ("GH_TOKEN", "GITHUB_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     home = tmp_path / "box"

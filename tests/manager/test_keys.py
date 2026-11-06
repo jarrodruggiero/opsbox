@@ -1,12 +1,12 @@
 """Tests for opsbox.manager.keys."""
 from __future__ import annotations
 
-import os
 import pathlib
 import textwrap
 
 import pytest
 
+from opsbox.manager import keys
 from opsbox.manager.keys import (
     KeyError_,
     describe,
@@ -21,7 +21,7 @@ from opsbox.manager.keys import (
 
 @pytest.fixture
 def fake_gh(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
-    """Write a fake `gh` script and add its directory to PATH."""
+    """Write a fake `gh` script and point keys.GH at it."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
 
@@ -66,7 +66,7 @@ def fake_gh(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.
     )
     script.chmod(0o755)
 
-    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+    monkeypatch.setattr(keys, "GH", str(script))
     return bin_dir
 
 
@@ -341,7 +341,7 @@ def test_bad_yaml_and_bad_tokens_are_refused(setup_home) -> None:
 
 def test_github_without_gh_reads_as_unset(setup_home, monkeypatch) -> None:
     """A missing gh binary means GitHub shows as unset, and setting it fails with a KeyError_."""
-    monkeypatch.setenv("PATH", "/nonexistent")
+    monkeypatch.setattr(keys, "GH", "/nonexistent/gh")
     assert describe("github")["set"] is False
     with pytest.raises(KeyError_):
         set_key("github", "ghp_good")

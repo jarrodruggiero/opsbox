@@ -219,7 +219,7 @@ class TestConfirmText:
         page = render.page(ctx())
         assert "The other keys are kept." in page
         assert "The box stays signed in to Claude." in page
-        assert "The keys are kept." in page
+        assert "The keys are kept, and only this account can sign it back in." in page
 
 
 class TestNoInline:

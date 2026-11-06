@@ -24,8 +24,10 @@ services:
     hostname: opsbox
     # The manager restarts Remote Control itself; this restarts the manager.
     restart: unless-stopped
-    # The manager page, plain HTTP. On anything but a trusted LAN, put HTTPS in
-    # front of it and publish it on 127.0.0.1 only ("127.0.0.1:8080:8080").
+    # The manager page, plain HTTP. This publishes it on every interface, and
+    # Docker's published ports go around ufw and firewalld: on anything but a
+    # trusted LAN, publish it on one address ("192.168.1.10:8080:8080"), or on
+    # 127.0.0.1 behind an HTTPS proxy.
     ports:
       - "8080:8080"
     # For the `remote-control` command (Remote Control without the page),

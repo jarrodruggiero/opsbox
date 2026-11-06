@@ -142,6 +142,10 @@ run_manager() {
 run_remote_control() {
   check_home
   check_workdir
+  # The settings set on the manager page, which the manager would otherwise
+  # apply itself.
+  # shellcheck source=/dev/null
+  . /usr/local/lib/opsbox/env.sh
   wait_for_sign_in
   cd "$WORKDIR"
   log "starting claude remote-control in $WORKDIR (first start: docker attach to answer the trust question)"

@@ -22,6 +22,7 @@ import hmac
 import json
 import os
 import secrets
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -30,13 +31,18 @@ from pathlib import Path
 def _write_private(path: Path, data: str) -> None:
     """Write *data* to *path* atomically with mode 0600."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # A name of its own per write (mkstemp makes it 0600), so two writes at
+    # once can't rename each other's temporary file away.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        os.write(fd, data.encode())
-    finally:
-        os.close(fd)
-    os.replace(str(tmp), str(path))
+        try:
+            os.write(fd, data.encode())
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _hash(token: str) -> str:
@@ -52,6 +58,8 @@ class Sessions:
         self.secret_path = directory / "secret"
         self.ttl_seconds = ttl_seconds
         self._lock = threading.Lock()
+        self._secret_lock = threading.Lock()
+        self._secret_value: bytes | None = None
 
     def _load(self) -> dict:
         """Return the sessions dict, dropping expired entries."""
@@ -109,18 +117,23 @@ class Sessions:
         )
 
     def _secret(self) -> bytes:
-        """Read or create the HMAC secret (at least 32 bytes)."""
-        # Stored as hex, so read back with fromhex: returning the raw file would
-        # give a different key from the one the first call used.
-        try:
-            raw = bytes.fromhex(self.secret_path.read_text().strip())
-            if len(raw) >= 32:
-                return raw
-        except (FileNotFoundError, ValueError):
-            pass
-        secret = secrets.token_bytes(32)
-        _write_private(self.secret_path, secret.hex())
-        return secret
+        """Read or create the HMAC secret (at least 32 bytes), once."""
+        # Under a lock: two first requests at once would otherwise each make
+        # a secret, and the loser's CSRF value would never verify.
+        with self._secret_lock:
+            if self._secret_value is None:
+                # Stored as hex, so read back with fromhex: returning the raw
+                # file would give a different key from the one first used.
+                try:
+                    raw = bytes.fromhex(self.secret_path.read_text().strip())
+                    if len(raw) >= 32:
+                        self._secret_value = raw
+                except (FileNotFoundError, ValueError):
+                    pass
+            if self._secret_value is None:
+                self._secret_value = secrets.token_bytes(32)
+                _write_private(self.secret_path, self._secret_value.hex())
+            return self._secret_value
 
     def csrf(self, token: str) -> str:
         """Return the CSRF value for *token*."""

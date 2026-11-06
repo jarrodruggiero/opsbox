@@ -25,35 +25,52 @@ def mirror(console: supervisor.Console) -> None:
 
 def main() -> int:
     home = Path(os.environ["HOME"])
+    state = home / ".config/opsbox/manager"
     workdir = os.environ.get("OPSBOX_WORKDIR", str(home / "workspace"))
     Path(workdir).mkdir(parents=True, exist_ok=True)
     console = supervisor.Console()
     threading.Thread(target=mirror, args=(console,), daemon=True).start()
     rc = supervisor.RemoteControl(
-        console, workdir=workdir, args=["--spawn", "same-dir", *sys.argv[1:]], env_file=keys.env_path(),
+        console, workdir=workdir, args=["--spawn", "same-dir", *sys.argv[1:]],
+        env_file=keys.env_path(), owner_file=state / "owner",
     )
     manager = web.Manager(
         home=home, rc=rc, console=console,
-        sessions=sessions.Sessions(home / ".config/opsbox/manager"),
+        sessions=sessions.Sessions(state),
         render=render.page,
         static_dir=Path("/usr/local/lib/opsbox/manager/static"),
-        hosts=[h for h in os.environ.get("OPSBOX_MANAGER_HOSTS", "").split(",") if h],
+        hosts=os.environ.get("OPSBOX_MANAGER_HOSTS", "").split(","),
     )
-    server = web.serve(manager, port=int(os.environ.get("OPSBOX_MANAGER_PORT", "8080")))
-    port = server.server_address[1]
-    console.note(f"manager on port {port}")
-    print(f"opsbox-manager: serving on port {port}; open http://<this box's address>:{port}/", file=sys.stderr, flush=True)
-    # Remote Control waits by itself while the box is signed out.
+    manager.clear_stale_signins()
+    # Remote Control first: it needs no port, and a box that's already set up
+    # keeps working even if the page can't listen.
     rc.start()
+    done = threading.Event()
+    port = int(os.environ.get("OPSBOX_MANAGER_PORT", "8080"))
+    try:
+        server = web.serve(manager, port=port)
+    except OSError as failed:
+        message = f"the manager page can't listen on port {port} ({failed.strerror}); Remote Control runs without it"
+        console.note(message)
+        print(f"opsbox-manager: {message}", file=sys.stderr, flush=True)
+        server = None
+    else:
+        console.note(f"manager on port {port}")
+        print(f"opsbox-manager: serving on port {port}; open http://<this box's address>:{port}/", file=sys.stderr, flush=True)
 
     def stop(signum: int, frame: object) -> None:
         rc.stop()
-        # shutdown() waits for serve_forever to return, so not from its own thread.
-        threading.Thread(target=server.shutdown, daemon=True).start()
+        done.set()
+        if server is not None:
+            # shutdown() waits for serve_forever to return, so not from its own thread.
+            threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    server.serve_forever()
+    if server is not None:
+        server.serve_forever()
+    else:
+        done.wait()
     return 0
 
 

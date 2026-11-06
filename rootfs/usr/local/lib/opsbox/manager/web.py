@@ -10,6 +10,14 @@ to Claude:
 The box's own sign-in, and its Remote Control session, are never touched by a
 browser's check.
 
+The box belongs to the account of its first sign-in, recorded in
+~/.config/opsbox/manager/owner (or adopted from a box already signed in). After
+that, a sign-in as any other account is refused, even while the box is signed
+out, so signing the box out never hands it and its keys to the next visitor.
+Changing the account means signing the box out, then deleting that file from a
+shell on the box. And a
+status that can't be read is never taken for "signed out".
+
 A sign-in belongs to the browser that started it. Only that browser sees its
 link and can finish or cancel it. Otherwise, during first setup, anyone on the
 LAN who loaded the page could open the link, sign in with their own account,
@@ -51,6 +59,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import claude, keys
+from .sessions import _write_private
 
 MAX_BODY = 131072
 SESSION_COOKIE = "opsbox_session"
@@ -81,12 +90,16 @@ MESSAGES = {
 }
 
 SECURITY_HEADERS = {
-    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
     "Cache-Control": "no-store",
 }
+
+# style-src-elem allows the <style> elements xterm.js writes for its theme and
+# cell sizes; without them the console has no colours and its columns drift.
+# Style attributes and every script stay 'self' only.
 
 # What secrets.token_urlsafe(32) makes. Anything else in the cookie is
 # replaced rather than echoed back in Set-Cookie.
@@ -132,7 +145,9 @@ class Manager:
         self.render = render
         self.static_dir = static_dir
         self.claude_path = claude_path
-        self.hosts = hosts or []
+        # Host names compare case-insensitively, and a list typed as
+        # "a.home, b.home" means two names.
+        self.hosts = [h.strip().lower() for h in hosts or [] if h.strip()]
         self.login = None
         self.login_kind: str | None = None
         self.login_dir: str | None = None
@@ -142,6 +157,28 @@ class Manager:
         self._keys_cache: tuple[float, list[dict]] | None = None
         self.lock = threading.Lock()
         self.signin_dir = home / ".config/opsbox/manager/signin"
+        self.owner_path = home / ".config/opsbox/manager/owner"
+
+    def owner(self) -> tuple[str, str] | None:
+        """The (email, orgId) this box belongs to, or None before its first sign-in."""
+        return claude.read_owner(self.owner_path)
+
+    def _record_owner(self, account: tuple[str, str]) -> None:
+        """Pin the box to *account*, unless it already belongs to one."""
+        if self.owner() is None:
+            _write_private(self.owner_path, json.dumps({"email": account[0], "orgId": account[1]}))
+
+    def clear_stale_signins(self) -> None:
+        """Log out and delete throwaway sign-ins a crash or restart left behind in the volume."""
+        if not self.signin_dir.is_dir():
+            return
+        for leftover in self.signin_dir.iterdir():
+            # Never follow a link out of the directory.
+            if leftover.is_dir() and not leftover.is_symlink():
+                claude.logout(config_dir=str(leftover), claude=self.claude_path)
+                shutil.rmtree(leftover, ignore_errors=True)
+            else:
+                leftover.unlink(missing_ok=True)
 
     def box_status(self) -> dict:
         """The box's `claude auth status`, cached for 5 seconds: every page load and status poll asks."""
@@ -150,6 +187,11 @@ class Manager:
             return cached[1]
         status = claude.auth_status(claude=self.claude_path)
         self._box_cache = (time.monotonic(), status)
+        # A box signed in before the manager existed (the CLI, an older image)
+        # is adopted: its account becomes the owner.
+        account = claude.identity(status)
+        if account is not None:
+            self._record_owner(account)
         return status
 
     def box_identity(self) -> tuple[str, str] | None:
@@ -179,6 +221,10 @@ class Manager:
         """Start signing in, cancelling any other sign-in; return the claude.ai link."""
         with self.lock:
             self._clear_flow()
+            if self.box_status().get("error"):
+                # Unknown is not signed out: a box sign-in now would run over
+                # the box's own credentials.
+                raise ValueError("Couldn't check the box's sign-in; try again.")
             if self.box_identity() is None:
                 kind, config_dir = "box", None
             else:
@@ -214,8 +260,17 @@ class Manager:
                 ok = self.login.wait(60)
                 if self.login_kind == "box":
                     self._box_cache = None
-                    if not (ok and self.box_identity() is not None):
+                    account = claude.identity(self.box_status()) if ok else None
+                    if account is None:
                         raise ValueError("Claude didn't accept that code. Start again.")
+                    owner = self.owner()
+                    if owner is not None and account != owner:
+                        # Undo it before anything uses it; the supervisor
+                        # also refuses to start Remote Control as this account.
+                        claude.logout(claude=self.claude_path)
+                        self._box_cache = None
+                        raise WrongAccount("That's a different Claude account from the one this box uses.")
+                    self._record_owner(account)
                     token = self.sessions.issue(label)
                     # It only wakes Remote Control; it never starts a second one.
                     self.rc.start()
@@ -226,7 +281,7 @@ class Manager:
                 claude.logout(config_dir=self.login_dir, claude=self.claude_path)
                 if browser is None:
                     raise ValueError("Claude didn't accept that code. Start again.")
-                if browser != self.box_identity():
+                if browser != (self.owner() or self.box_identity()):
                     raise WrongAccount("That's a different Claude account from the one this box uses.")
                 return self.sessions.issue(label)
             finally:
@@ -259,6 +314,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     server_version = "opsbox"
     sys_version = ""
+    # Seconds a connection may sit without sending or reading anything. Without
+    # it, a thousand idle connections from one LAN host hold a thousand threads
+    # and the page stops answering. The console's keepalive comes every 15.
+    timeout = 30
 
     # -- logging -----------------------------------------------------------
 
@@ -287,6 +346,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             host = host[1:].split("]", 1)[0]
         else:
             host = host.rsplit(":", 1)[0]
+        host = host.lower()
         try:
             ipaddress.ip_address(host)
             return True
@@ -313,10 +373,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return token if token and self.manager.sessions.valid(token) else None
 
     def _box(self, session: str | None) -> dict:
-        """What the page may say about the box: without a session, only whether it's signed in."""
+        """What the page may say about the box: without a session, only whether it's signed in and has an owner."""
         status = self.manager.box_status()
         if not session:
-            return {"loggedIn": bool(status.get("loggedIn"))}
+            return {"loggedIn": bool(status.get("loggedIn")), "owned": self.manager.owner() is not None}
         return {name: status.get(name) for name in ("loggedIn", "email", "orgName", "subscriptionType")}
 
     def _login(self, presession: str | None) -> dict:
@@ -464,31 +524,50 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _console(self) -> None:
         """Server-sent events: everything kept so far as one "reset" event, then each chunk as it comes."""
-        if not self._session():
+        token = self._session()
+        if not token:
             self._json(401, {"error": "Sign in first."})
             return
         console = self.manager.console
         backlog, q = console.attach()
+        checked = time.monotonic()
         try:
             # No Content-Length: the stream lasts as long as the page is open,
             # and HTTP/1.0 ends it by closing the connection.
-            self._headers(200, "text/event-stream")
+            self._send_stream_headers()
             self.wfile.write(b"event: reset\ndata: " + base64.b64encode(backlog) + b"\n\n")
             self.wfile.flush()
             while True:
                 try:
                     chunk = q.get(timeout=15)
                 except queue.Empty:
-                    self.wfile.write(b": keepalive\n\n")
-                else:
-                    if chunk is None:
+                    chunk = b""
+                if chunk is None or not console.subscribed(q):
+                    # Ended, or dropped for falling behind; the page reconnects.
+                    return
+                # Before anything is written, so a signed-out browser's open
+                # console gets nothing more (checked at most once a second).
+                if time.monotonic() - checked >= 1:
+                    if not self.manager.sessions.valid(token):
                         return
-                    self.wfile.write(b"data: " + base64.b64encode(chunk) + b"\n\n")
+                    checked = time.monotonic()
+                self.wfile.write(b"data: " + base64.b64encode(chunk) + b"\n\n" if chunk else b": keepalive\n\n")
                 self.wfile.flush()
         except OSError:
             pass
         finally:
             console.unsubscribe(q)
+
+    def _send_stream_headers(self) -> None:
+        """Headers for the console's event stream: no length, and no proxy buffering."""
+        self.send_response(200)
+        for name, value in SECURITY_HEADERS.items():
+            self.send_header(name, value)
+        self.send_header("Content-Type", "text/event-stream")
+        # nginx would otherwise hold the stream back until a buffer fills.
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self._responded = True
 
     def _post(self, path: str) -> None:
         """Route a POST by exact path, after the CSRF check."""
@@ -511,8 +590,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 manager.rc.stop()
                 self._redirect("stopped")
             elif path == "/rc/restart":
-                manager.rc.restart()
-                self._redirect("restarted")
+                if manager.rc.restart():
+                    self._redirect("restarted")
+                else:
+                    self._page(status=400, error="Remote Control isn't running, so there's nothing to restart.")
             elif path == "/rc/trust":
                 if manager.rc.answer_trust():
                     self._redirect("trusted")

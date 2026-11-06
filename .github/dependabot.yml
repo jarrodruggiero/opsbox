@@ -53,7 +53,8 @@ updates:
       actions:
         patterns: ["*"]
 
-  # The manager page's terminal (xterm.js), vendored into the image.
+  # The manager page's terminal (xterm.js), vendored into the image. A major
+  # version arrives on its own, because it's the one that can break the page.
   - package-ecosystem: npm
     directory: /ui
     schedule:
@@ -61,6 +62,7 @@ updates:
     groups:
       ui:
         patterns: ["*"]
+        update-types: [minor, patch]
 
   - package-ecosystem: pip
     directory: /
