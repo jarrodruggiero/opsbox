@@ -48,6 +48,13 @@ class Console:
             self._subscribers.append(q)
         return q
 
+    def attach(self) -> tuple[bytes, queue.Queue[bytes | None]]:
+        """Take the backlog and subscribe in one step, so a new viewer neither misses nor repeats a chunk."""
+        q: queue.Queue[bytes | None] = queue.Queue()
+        with self._lock:
+            self._subscribers.append(q)
+            return bytes(self._buffer), q
+
     def unsubscribe(self, q: queue.Queue[bytes | None]) -> None:
         """Remove a subscriber queue if present."""
         with self._lock:

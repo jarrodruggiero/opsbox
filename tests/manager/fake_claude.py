@@ -63,6 +63,12 @@ def cmd_auth_status() -> int:
 def cmd_auth_logout() -> int:
     """Simulate `claude auth logout`."""
     state_dir = _state_dir()
+    # Logged outside the state dir, so a test can see a logout even after the
+    # directory itself has been deleted.
+    log = os.environ.get("FAKE_CLAUDE_LOG")
+    if log:
+        with open(log, "a") as f:
+            f.write(f"logout {state_dir}\n")
     signed_in_path = os.path.join(state_dir, "signed-in")
     if os.path.exists(signed_in_path):
         os.remove(signed_in_path)
