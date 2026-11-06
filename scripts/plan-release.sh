@@ -14,7 +14,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 readonly SCRIPT_DIR
 readonly VERSIONS_FILE=/usr/local/share/opsbox/versions.txt
 readonly TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+$'
-readonly IMAGE_INPUTS=(Dockerfile .dockerignore rootfs)
+# ui is the page's vendored terminal, so it's part of the image too.
+readonly IMAGE_INPUTS=(Dockerfile .dockerignore rootfs ui)
 
 # Global, not local to main: the EXIT trap that removes it runs after main has
 # returned, when a local would be gone (and unbound, which `set -u` turns into

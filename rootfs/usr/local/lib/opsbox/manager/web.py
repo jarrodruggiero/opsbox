@@ -63,6 +63,7 @@ STATIC = {
     "manager.js": "text/javascript",
     "xterm.js": "text/javascript",
     "xterm.css": "text/css",
+    "xterm-addon-fit.js": "text/javascript",
 }
 
 MESSAGES = {

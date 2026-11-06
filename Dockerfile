@@ -30,6 +30,14 @@ FROM quay.io/cilium/cilium-cli:v0.20.2@sha256:40597ffa6477095c547d24b617d33b5a5e
 FROM ghcr.io/restic/restic:0.19.1@sha256:2f0373803493361f9304a57150d464677f69a9dad487afec202105aafb2592f2 AS restic
 FROM docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d AS shellcheck
 FROM ghcr.io/jdx/mise:2026.10.25@sha256:91417f41840316b7c5da6854bef393eccea4546ae70f8baf0803e0e94287b68d AS mise
+# The terminal on the manager page is xterm.js, vendored here from
+# ui/package-lock.json: npm ci checks every package against the lockfile's
+# hash and runs none of their install scripts. Dependabot keeps the lockfile
+# current.
+FROM node AS ui
+WORKDIR /ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
 
 FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
 ARG TARGETARCH
@@ -145,6 +153,11 @@ COPY --chown=0:0 --from=mise /usr/local/bin/mise /usr/local/bin/mise
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 COPY --chown=0:0 --chmod=0755 rootfs/usr/local/bin/ /usr/local/bin/
+# The manager writes only under $HOME, so the read-only root still holds.
+COPY --chown=0:0 rootfs/usr/local/lib/opsbox/ /usr/local/lib/opsbox/
+COPY --chown=0:0 --from=ui /ui/node_modules/@xterm/xterm/lib/xterm.js /usr/local/lib/opsbox/manager/static/xterm.js
+COPY --chown=0:0 --from=ui /ui/node_modules/@xterm/xterm/css/xterm.css /usr/local/lib/opsbox/manager/static/xterm.css
+COPY --chown=0:0 --from=ui /ui/node_modules/@xterm/addon-fit/lib/addon-fit.js /usr/local/lib/opsbox/manager/static/xterm-addon-fit.js
 
 # Smoke test: every tool must run, on every architecture. It runs as nobody,
 # so a tool's first run can't change anything outside the temporary
@@ -188,8 +201,14 @@ ENV SHELL=/bin/bash
 USER opsbox
 WORKDIR /home/opsbox
 
-# tini reaps the sessions' child processes and forwards signals. --spawn
-# same-dir answers the question claude remote-control would otherwise ask
-# on its first start, which nobody may be attached to answer.
+# The manager page, plain HTTP; put HTTPS in front of it if it's reachable
+# beyond your LAN.
+EXPOSE 8080
+
+# tini reaps the sessions' child processes and forwards signals. The manager
+# serves the page that signs in and answers the trust question, and answers
+# nothing on its own. It runs claude remote-control with --spawn same-dir,
+# which answers the question remote-control would otherwise ask on its first
+# start.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/opsbox-entrypoint"]
-CMD ["remote-control", "--spawn", "same-dir"]
+CMD ["manager"]

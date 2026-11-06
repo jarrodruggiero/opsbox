@@ -1,0 +1,61 @@
+#!/usr/bin/python3
+"""Serve the opsbox manager page, and run Remote Control under it."""
+# Debian's Python, by full path: it has python3-yaml, and PATH starts with
+# ~/.local/bin, which lives in the volume.
+
+import os
+import signal
+import sys
+import threading
+from pathlib import Path
+
+sys.path.insert(0, "/usr/local/lib")
+
+from opsbox.manager import keys, render, sessions, supervisor, web  # noqa: E402
+
+
+def mirror(console: supervisor.Console) -> None:
+    """Copy the console to stdout, so `docker logs` still shows Remote Control's
+    output, as it did when Remote Control was the container's main process."""
+    q = console.subscribe()
+    while (chunk := q.get()) is not None:
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
+
+
+def main() -> int:
+    home = Path(os.environ["HOME"])
+    workdir = os.environ.get("OPSBOX_WORKDIR", str(home / "workspace"))
+    Path(workdir).mkdir(parents=True, exist_ok=True)
+    console = supervisor.Console()
+    threading.Thread(target=mirror, args=(console,), daemon=True).start()
+    rc = supervisor.RemoteControl(
+        console, workdir=workdir, args=["--spawn", "same-dir", *sys.argv[1:]], env_file=keys.env_path(),
+    )
+    manager = web.Manager(
+        home=home, rc=rc, console=console,
+        sessions=sessions.Sessions(home / ".config/opsbox/manager"),
+        render=render.page,
+        static_dir=Path("/usr/local/lib/opsbox/manager/static"),
+        hosts=[h for h in os.environ.get("OPSBOX_MANAGER_HOSTS", "").split(",") if h],
+    )
+    server = web.serve(manager, port=int(os.environ.get("OPSBOX_MANAGER_PORT", "8080")))
+    port = server.server_address[1]
+    console.note(f"manager on port {port}")
+    print(f"opsbox-manager: serving on port {port}; open http://<this box's address>:{port}/", file=sys.stderr, flush=True)
+    # Remote Control waits by itself while the box is signed out.
+    rc.start()
+
+    def stop(signum: int, frame: object) -> None:
+        rc.stop()
+        # shutdown() waits for serve_forever to return, so not from its own thread.
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

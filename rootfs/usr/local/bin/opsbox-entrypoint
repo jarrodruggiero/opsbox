@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# opsbox-entrypoint - start Claude Code Remote Control, or run a command.
+# opsbox-entrypoint - serve the manager page and run Remote Control under it,
+# run Remote Control directly, or run a command.
 # See usage() or --help for details.
 
 set -euo pipefail
@@ -25,23 +26,31 @@ readonly CLAUDE=/usr/bin/claude
 # usage - print how to invoke this script.
 usage() {
   cat <<EOF
-Usage: opsbox-entrypoint [remote-control [OPTIONS...]]
+Usage: opsbox-entrypoint [manager [OPTIONS...]]
+       opsbox-entrypoint remote-control [OPTIONS...]
        opsbox-entrypoint COMMAND [ARGS...]
 
-With remote-control (the image's default command) or no arguments: wait
-until Claude Code is signed in, then run claude remote-control OPTIONS...
-in WORKDIR. Any other COMMAND runs as given, for example bash or
-opsbox-versions.
+With manager (the image's default command) or no arguments: serve the
+manager page on port 8080, and run claude remote-control --spawn same-dir
+OPTIONS... in WORKDIR under it. Open http://<this box>:8080/ to sign in to
+Claude, answer the trust question and manage the keys.
 
-Environment: OPSBOX_WORKDIR, the directory sessions start in (default
-$HOME/workspace). It must not be $HOME itself, because Claude Code never
-saves a trust answer for the home directory.
+With remote-control: wait until Claude Code is signed in, then run claude
+remote-control OPTIONS... in WORKDIR directly, without the page. Sign in
+with docker exec -it <container> claude auth login, and on the first start
+docker attach <container> to answer the trust question, detaching with
+Ctrl-P Ctrl-Q.
 
-One-time steps:
-  Sign in with:
-  docker exec -it <container> claude auth login
-  On the first start docker attach <container> to answer the directory-
-  trust question, detaching with Ctrl-P Ctrl-Q.
+Any other COMMAND runs as given, for example bash or opsbox-versions.
+
+Environment:
+  OPSBOX_WORKDIR        the directory sessions start in (default
+                        $HOME/workspace). It must not be $HOME itself, because
+                        Claude Code never saves a trust answer for the home
+                        directory.
+  OPSBOX_MANAGER_PORT   the manager page's port (default 8080).
+  OPSBOX_MANAGER_HOSTS  names, comma-separated, that the page answers to
+                        besides IP addresses, for example opsbox.home.
 EOF
 }
 
@@ -112,14 +121,27 @@ wait_for_sign_in() {
   done
 }
 
-# run_remote_control - check HOME, create WORKDIR, wait for sign-in, exec.
-run_remote_control() {
-  check_home
+# check_workdir - die if WORKDIR is HOME itself, then create it.
+check_workdir() {
   # Resolved, so a trailing slash or a /. can't sneak $HOME past the check.
   if [ "$(realpath -m -- "$WORKDIR")" = "$(realpath -m -- "$HOME")" ]; then
     die "OPSBOX_WORKDIR is \$HOME; use a directory under it, because Claude Code never saves a trust answer for the home directory"
   fi
   mkdir -p "$WORKDIR"
+}
+
+# run_manager - check HOME and WORKDIR, then exec the manager, which serves
+# the page and runs Remote Control under it.
+run_manager() {
+  check_home
+  check_workdir
+  exec /usr/local/bin/opsbox-manager "$@"
+}
+
+# run_remote_control - check HOME, create WORKDIR, wait for sign-in, exec.
+run_remote_control() {
+  check_home
+  check_workdir
   wait_for_sign_in
   cd "$WORKDIR"
   log "starting claude remote-control in $WORKDIR (first start: docker attach to answer the trust question)"
@@ -140,12 +162,16 @@ main() {
       usage
       exit 0
       ;;
+    manager)
+      shift
+      run_manager "$@"
+      ;;
     remote-control)
       shift
       run_remote_control "$@"
       ;;
     "")
-      run_remote_control
+      run_manager
       ;;
     *)
       exec "$@"

@@ -53,6 +53,15 @@ updates:
       actions:
         patterns: ["*"]
 
+  # The manager page's terminal (xterm.js), vendored into the image.
+  - package-ecosystem: npm
+    directory: /ui
+    schedule:
+      interval: monthly
+    groups:
+      ui:
+        patterns: ["*"]
+
   - package-ecosystem: pip
     directory: /
     schedule:

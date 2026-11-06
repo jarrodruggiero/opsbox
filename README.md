@@ -28,23 +28,37 @@ are private to it.
 
 ## Running it
 
-[`compose.yaml`](compose.yaml) is a complete example. Two steps are needed
-once, after the first start:
+[`compose.yaml`](compose.yaml) is a complete example. After the first start,
+open the manager page at `http://<the box's address>:8080/`:
 
-1. **Sign in:** `docker exec -it opsbox claude auth login`, and follow the link
-   it prints. Remote Control needs a claude.ai sign-in on a Pro, Max, Ultra,
-   Team or Enterprise plan. A `claude setup-token` token or an API key can't
-   start Remote Control sessions.
-2. **Trust the workspace:** `docker attach opsbox`. The question about trusting
-   `~/workspace` was printed before you attached, so the screen may look blank
-   (`docker logs opsbox` shows it): type `y` and Enter, then detach with Ctrl-P
-   Ctrl-Q.
+1. **Sign in to Claude.** The page gives you a claude.ai link: sign in there,
+   2FA included, and paste the code claude.ai shows into the page. Remote
+   Control needs a claude.ai sign-in on a Pro, Max, Ultra, Team or Enterprise
+   plan; a `claude setup-token` token or an API key can't start it.
+2. **Trust the workspace.** On its first start Remote Control asks whether to
+   trust `~/workspace`, and the page shows the question with a Trust button.
 
 The box then shows up under Remote Control in the Claude app and at
-claude.ai/code, and new sessions start in `~/workspace`.
+claude.ai/code, and new sessions start in `~/workspace`. The page also shows
+Remote Control's output live, starts, stops and restarts it, and sets the box's
+keys and settings. **Keys are write-only:** the page shows what each one
+authenticates as, never the key itself.
 
 If the network drops for more than about 10 minutes, `claude remote-control`
-exits, and the restart policy brings it back.
+exits, and the manager starts it again.
+
+**Who can use the page.** It has no accounts of its own: a browser gets in by
+signing in to Claude as the box's account. While the box is signed out, the
+first sign-in becomes the box's, so finish setup promptly. The page is plain
+HTTP, so the sign-in code and the browser's session cross the network
+unencrypted: fine on a trusted LAN; anywhere else, put HTTPS in front of it and
+limit who can reach port 8080. It answers only to IP addresses and to the names
+in `OPSBOX_MANAGER_HOSTS` (comma-separated), which stops DNS rebinding.
+
+**Without the page:** set the container's command to `remote-control --spawn
+same-dir`, as before the manager. Then sign in with `docker exec -it opsbox
+claude auth login`, and answer the trust question with `docker attach opsbox`
+(it needs `tty` and `stdin_open`), detaching with Ctrl-P Ctrl-Q.
 
 **Trusting `~/workspace` trusts everything under it.** Claude Code carries a
 directory's trust down to every directory inside it, so a repository cloned
@@ -64,7 +78,7 @@ firewall rules can name it. Never map the Docker socket.
 ### Your keys
 
 Everything personal lives in the volume at `/home/opsbox`, and none of it is
-in the image:
+in the image. The manager page sets most of these:
 
 - **Claude Code:** `~/.claude`, `~/.claude.json`
 - **SSH:** `~/.ssh`

@@ -111,11 +111,12 @@ def test_versions_file_lists_every_tool() -> None:
 
 
 def test_help() -> None:
-    """--help returns 0 and mentions OPSBOX_WORKDIR."""
+    """--help returns 0 and names the settings and both ways to run."""
     result = run("--help", check=False)
     assert result.returncode == 0
     combined = result.stdout + result.stderr
-    assert "OPSBOX_WORKDIR" in combined
+    for word in ("OPSBOX_WORKDIR", "OPSBOX_MANAGER_PORT", "OPSBOX_MANAGER_HOSTS", "manager", "remote-control"):
+        assert word in combined
 
 
 def test_runs_a_command() -> None:
@@ -220,9 +221,13 @@ def test_workdir_cannot_be_home() -> None:
     assert "trust" in stderr
 
 
-def waits_with(message: str, *env: str) -> None:
-    """Start the image detached and check it waits, saying message."""
-    result = docker("run", "-d", *env, IMAGE)
+def waits_with(message: str, *options: str, command: tuple[str, ...] = (), page: bool = False) -> None:
+    """Start the image detached and check it keeps running, saying message.
+
+    With page, also fetch the manager page and its files from inside the
+    container, the way a browser on the LAN would.
+    """
+    result = docker("run", "-d", *options, IMAGE, *command)
     container_id = result.stdout.strip()
     try:
         for _ in range(20):
@@ -235,19 +240,39 @@ def waits_with(message: str, *env: str) -> None:
             pytest.fail(f"timed out waiting for {message!r}")
         state = docker("inspect", "-f", "{{.State.Running}}", container_id)
         assert state.stdout.strip() == "true"
+        if page:
+            fetched = docker("exec", container_id, "curl", "-fsS", "http://127.0.0.1:8080/")
+            assert "Sign in to Claude" in fetched.stdout
+            # The vendored terminal made it into the image, under the names
+            # the page asks for.
+            for name in ("manager.css", "manager.js", "xterm.js", "xterm.css", "xterm-addon-fit.js"):
+                docker("exec", container_id, "curl", "-fsS", "-o", "/dev/null", f"http://127.0.0.1:8080/static/{name}")
     finally:
         docker("rm", "-f", container_id, check=False)
 
 
-def test_waits_for_sign_in() -> None:
-    """The image waits for sign-in; it does not exit immediately."""
-    waits_with("not signed in to Claude Code yet")
+def test_manager_waits_for_sign_in_and_serves_the_page() -> None:
+    """The default command serves the page and waits for a sign-in; it does not exit."""
+    waits_with("not signed in to Claude yet", page=True)
 
 
-def test_api_key_waits_instead_of_crash_looping() -> None:
+def test_remote_control_still_waits_for_sign_in() -> None:
+    """remote-control runs it without the page, as before the manager."""
+    waits_with("not signed in to Claude Code yet", command=("remote-control", "--spawn", "same-dir"))
+
+
+@pytest.mark.parametrize("command", [(), ("remote-control", "--spawn", "same-dir")], ids=["manager", "remote-control"])
+def test_api_key_waits_instead_of_crash_looping(command: tuple[str, ...]) -> None:
     """An API key counts as signed in but can't start Remote Control.
 
-    `claude remote-control` would exit at once, and a restart policy would
-    loop without ever saying why.
+    `claude remote-control` would exit at once, and a restart (by Docker, or
+    by the manager) would loop without ever saying why.
     """
-    waits_with("can't start Remote Control", "-e", "ANTHROPIC_API_KEY=sk-ant-api03-not-a-real-key")
+    waits_with("can't start Remote Control", "-e", "ANTHROPIC_API_KEY=sk-ant-api03-not-a-real-key", command=command)
+
+
+def test_manager_refuses_workdir_home() -> None:
+    """The manager has the same refusal as remote-control: no trust answer is ever saved for $HOME."""
+    result = run("manager", env={"OPSBOX_WORKDIR": "/home/opsbox/"}, check=False)
+    assert result.returncode == 1
+    assert "trust" in result.stderr

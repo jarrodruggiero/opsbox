@@ -12,17 +12,16 @@
   2. ExtraParams: the user flag 1000:1000 (opsbox, not root), the
      read-only flag, tmpfs /tmp and tmpfs /var/tmp (transient files),
      cap-drop ALL (drop all capabilities), security-opt no-new-privileges
-     (stops a setuid binary from raising privileges), -it (interactive
-     terminal for the trust question), hostname opsbox (fixed session name
-     across updates), restart=unless-stopped (see point 4).
-  3. After the first start: a. `docker exec -it opsbox claude auth login`,
-     b. `docker attach opsbox`, type y and Enter at the trust question (it
-     was printed before you attached), then detach with Ctrl-P Ctrl-Q.
+     (stops a setuid binary from raising privileges), hostname opsbox (fixed
+     session name across updates), restart=unless-stopped (see point 4).
+  3. After the first start, open the WebUI (the manager page, port 8080 on
+     the container's br0 address) to sign in to Claude and answer the trust
+     question. It is plain HTTP: keep br0's address off the internet.
 
-  4. Restart policy: dockerMan sets no restart policy by default and
-     `claude remote-control` exits after about 10 minutes offline, so the
-     policy brings it back. Use unless-stopped, not always, because stopping
-     the container from the Unraid UI must keep it stopped.
+  4. Restart policy: dockerMan sets no restart policy by default. The
+     manager restarts Remote Control itself; the policy restarts the manager.
+     Use unless-stopped, not always, because stopping the container from the
+     Unraid UI must keep it stopped.
 -->
 <Container version="2">
   <Name>opsbox</Name>
@@ -38,14 +37,14 @@
     Claude Code Remote Control with a homelab toolchain: kubectl, talosctl,
     Terraform, Helm, gh and more. The keys live only in the Home path.
     SETUP: create a share of its own with SMB and NFS export off, owned by
-    1000:1000 with mode 0700; set an address for br0; start it; then sign in
-    (see the comment at the top). Unofficial; not affiliated with Anthropic.
+    1000:1000 with mode 0700; set an address for br0; start it; then open the
+    WebUI to sign in to Claude. Unofficial; not affiliated with Anthropic.
   </Overview>
   <Category>Tools: Productivity:</Category>
-  <WebUI/>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/jarrodruggiero/opsbox/main/unraid/opsbox.xml</TemplateURL>
   <Icon/>
-  <ExtraParams>--user 1000:1000 --read-only --tmpfs /tmp --tmpfs /var/tmp --cap-drop ALL --security-opt no-new-privileges -it --hostname opsbox --restart=unless-stopped</ExtraParams>
+  <ExtraParams>--user 1000:1000 --read-only --tmpfs /tmp --tmpfs /var/tmp --cap-drop ALL --security-opt no-new-privileges --hostname opsbox --restart=unless-stopped</ExtraParams>
   <PostArgs/>
   <DonateText/>
   <DonateLink/>
@@ -58,6 +57,10 @@
           Default="opsbox"
           Description="The prefix of each session's name in the Claude app."
           Type="Variable" Display="advanced" Required="false" Mask="false">opsbox</Config>
+
+  <Config Name="Manager host names" Target="OPSBOX_MANAGER_HOSTS" Default=""
+          Description="Names the manager page answers to besides IP addresses, comma-separated (for example opsbox.home). It refuses any other name, which stops DNS rebinding."
+          Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
 
   <Config Name="Timezone" Target="TZ" Default="Australia/Melbourne"
           Description="The timezone for logs and for tools that print local times."
