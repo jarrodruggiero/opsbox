@@ -13,9 +13,15 @@
 #
 # Order matters: the image is tagged before the git tag and the GitHub release
 # exist, so a git tag pointing at no image can't happen. A published X.Y.Z is
-# never replaced: scripts/publish-image.sh refuses one that already holds
-# different images, which is what a fresh run after a failed `gh release
-# create` would build. That case stops with an error for a human.
+# never replaced, so a publish that fails after tagging costs that number:
+# scripts/plan-release.sh skips a version that already has an image, and the
+# next run takes the one after it.
+#
+# Only main's newest commit is released. GitHub refuses a release at a commit
+# whose workflow files differ from main's unless the token may change workflows,
+# which GITHUB_TOKEN never can, so a merge while a run builds could fail that
+# run after it tagged the image. The next run on main carries both, the weekly
+# one at the latest.
 name: Release
 
 on:
@@ -92,12 +98,15 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -m pytest -q tests --ignore=tests/manager/test_visual.py
       - name: Plan
         id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           notes="$RUNNER_TEMP/notes.md"
-          version=$(scripts/plan-release.sh --notes "$notes" opsbox:candidate "ghcr.io/${GITHUB_REPOSITORY,,}")
+          version=$(scripts/plan-release.sh --only-if-newest --notes "$notes" opsbox:candidate "ghcr.io/${GITHUB_REPOSITORY,,}")
           echo "version=$version" >> "$GITHUB_OUTPUT"
           {
-            echo "## ${version:-No release due}"
+            echo "## ${version:-No release from this run}"
             echo
             if [ -n "$version" ]; then cat "$notes"; fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -135,9 +144,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       # Labels only. The version label carries the plan's number. `publish`
-      # works the number out again from this build, and in the rare case
-      # that a floating tool's update lands between the two builds, the tag
-      # wins over the label.
+      # works the number out again from this build, and in the rare case that
+      # the two differ, because a floating tool's update landed between the two
+      # builds or a re-run took a later number, the tag wins over the label.
       - name: Image labels
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -184,9 +193,11 @@ jobs:
           name: build-${{ matrix.arch }}
           path: ${{ runner.temp }}/build/
           if-no-files-found: error
-          # A week, so "Re-run failed jobs" can still finish a publish that
-          # failed after tagging: a fresh run would refuse the tagged X.Y.Z.
-          retention-days: 7
+          # A day, so "Re-run failed jobs" can publish these images after a
+          # blip. Any later, start a new run: these could take `latest` from
+          # whatever was released since, and without them a re-run of `publish`
+          # stops at its version step, having tagged nothing.
+          retention-days: 1
 
   # Join the two architectures under the version's tags, then cut the release.
   publish:
@@ -221,25 +232,29 @@ jobs:
 
       # The version again, from the amd64 image that was actually pushed, so the
       # notes describe what ships rather than what `plan` built minutes earlier.
+      # This also asks again whether main has moved on, as it may have since then,
+      # and every step after this one is skipped when there's nothing to release.
       #
       # Only amd64 decides. A change that reaches arm64 alone, such as a Debian
       # rebuild for that architecture, ships with the next release amd64 makes;
       # the floating tools move most weeks. The warning below can only fire when
       # a release happens and the two architectures' tools differ.
       #
-      # These steps run in the checkout: plan-release.sh reads the repository's
-      # tags, and gh finds the repository from its git remote.
+      # These steps run in the checkout, because plan-release.sh reads the
+      # repository's tags.
       - name: Version and notes from the pushed image
         id: version
         env:
           BUILD: ${{ runner.temp }}/build
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          version=$(scripts/plan-release.sh --notes "$BUILD/notes.md" \
+          version=$(scripts/plan-release.sh --only-if-newest --notes "$BUILD/notes.md" \
             "$image@$(cat "$BUILD/digest-amd64")" "$image")
           if [ -z "$version" ]; then
-            echo "::error::plan found a release due, but the pushed image matches the last release"
-            exit 1
+            echo "::notice::This run releases nothing; this step's log says why."
+            exit 0
           fi
           if ! diff <(grep '^tool' "$BUILD/versions-amd64.txt") <(grep '^tool' "$BUILD/versions-arm64.txt"); then
             echo "::warning::amd64 and arm64 carry different tool versions; see the two versions files on the release"
@@ -248,6 +263,7 @@ jobs:
 
       # Never replaces a published X.Y.Z; see scripts/publish-image.sh.
       - name: Tag the image
+        if: steps.version.outputs.version != ''
         id: tag
         env:
           BUILD: ${{ runner.temp }}/build
@@ -267,12 +283,17 @@ jobs:
       # Without the last two, an attestation from any workflow on any branch of
       # the repository would pass.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: steps.version.outputs.version != ''
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.tag.outputs.digest }}
           push-to-registry: true
 
+      # A 404, or a 403 "Resource not accessible by integration", means a merge
+      # that changed a workflow file landed in the seconds since the version
+      # step. The next run on main releases this too, under the next number.
       - name: Create the release
+        if: steps.version.outputs.version != ''
         env:
           BUILD: ${{ runner.temp }}/build
           GH_TOKEN: ${{ github.token }}

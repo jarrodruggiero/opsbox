@@ -1,7 +1,7 @@
-"""Run scripts/plan-release.sh against a throwaway git repository and a fake docker.
+"""Run scripts/plan-release.sh against a throwaway git repository, with fake docker and gh.
 
 This tests the shell glue that gathers inputs for scripts/next-version.py,
-using a fake docker and a throwaway git repository so the developer's
+using fake docker and gh and a throwaway git repository so the developer's
 real environment cannot change the results.
 """
 from __future__ import annotations
@@ -23,7 +23,7 @@ MANIFEST = "tool\tkubectl\t1.36.6\ndeb\tgit\t1:2.47.3-0+deb13u1\n"
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    """Set up a throwaway git repo and a fake docker, then return helpers."""
+    """Set up a throwaway git repo and fake docker and gh, then return helpers."""
     # Prevent the developer's git config from changing results.
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
@@ -41,6 +41,18 @@ def env(tmp_path, monkeypatch):
     fake_docker = bin_dir / "docker"
     fake_docker.write_text(
         "#!/usr/bin/env bash\n"
+        'if [[ "$1 $2 $3" == "buildx imagetools inspect" ]]; then\n'
+        "    name=${4//[\\/:@]/_}\n"
+        '    if [[ -f "$FAKE_IMAGES/$name.error" ]]; then\n'
+        '        cat "$FAKE_IMAGES/$name.error" >&2\n'
+        "        exit 1\n"
+        '    elif [[ -f "$FAKE_IMAGES/$name" ]]; then\n'
+        '        echo "Name: $4"\n'
+        "        exit 0\n"
+        "    fi\n"
+        '    echo "ERROR: $4: not found" >&2\n'
+        "    exit 1\n"
+        "fi\n"
         'if [[ "$1" != "run" || "$2" != "--rm" || "$3" != "--entrypoint" ||\n'
         '     "$4" != "cat" ]]; then\n'
         '    echo "unsupported docker call" >&2\n'
@@ -56,7 +68,26 @@ def env(tmp_path, monkeypatch):
     )
     fake_docker.chmod(0o755)
 
-    # Set PATH so our fake docker comes first.
+    # A fake gh that answers one question: where main is on GitHub.
+    fake_gh = bin_dir / "gh"
+    fake_gh.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "$*" != "api repos/{owner}/{repo}/git/ref/heads/main --jq .object.sha" ]]; then\n'
+        '    echo "unsupported gh call: $*" >&2\n'
+        "    exit 64\n"
+        "fi\n"
+        'if [[ -f "$FAKE_MAIN" ]]; then\n'
+        '    cat "$FAKE_MAIN"\n'
+        "else\n"
+        """    echo '{"message":"Not Found","status":"404"}'\n"""
+        '    echo "gh: Not Found (HTTP 404)" >&2\n'
+        "    exit 1\n"
+        "fi\n"
+    )
+    fake_gh.chmod(0o755)
+    monkeypatch.setenv("FAKE_MAIN", str(tmp_path / "main-on-github"))
+
+    # Set PATH so our fakes come first.
     monkeypatch.setenv(
         "PATH", str(bin_dir) + ":" + os.environ.get("PATH", "/usr/bin:/bin")
     )
@@ -126,6 +157,13 @@ def env(tmp_path, monkeypatch):
                  "-c", "commit.gpgsign=false", "tag", name],
                 cwd=self.repo, check=True
             )
+
+        def main_on_github(self, answer: str | None = None) -> None:
+            """Make gh report this as main's commit; HEAD when none is given."""
+            if answer is None:
+                answer = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, check=True,
+                                        capture_output=True, text=True).stdout.strip()
+            (self.repo.parent / "main-on-github").write_text(answer + "\n")
 
         def run(self, *args: str) -> subprocess.CompletedProcess[str]:
             """Run plan-release.sh with the given args."""
@@ -263,6 +301,161 @@ def test_outside_a_repository_fails_clearly(env: Helpers, tmp_path: Path) -> Non
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 1
     assert "run this from inside the opsbox repository" in result.stderr
+
+
+def test_version_with_an_image_and_no_git_tag_is_skipped(env: Helpers) -> None:
+    """A publish that failed after tagging costs its number, and nothing else.
+
+    The image exists but the git tag doesn't, so the rules come to that number
+    again. A published version never changes, so every later run was refused
+    until someone finished the release by hand.
+    """
+    env.tag("v1.0.0")
+    env.commit("rootfs/usr/local/bin/opsbox-entrypoint", "#!/bin/sh\n# updated\n")
+    env.image("cand", MANIFEST)
+    env.image("reg/opsbox:1.0.0", MANIFEST)
+    env.image("reg/opsbox:1.0.1", MANIFEST)
+    result = env.run("cand", "reg/opsbox")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "v1.0.2\n"
+    assert "v1.0.1 has an image but no git tag" in result.stderr
+
+
+def test_every_taken_version_is_skipped(env: Helpers) -> None:
+    """Two failures in a row cost two numbers."""
+    env.tag("v1.0.0")
+    env.commit("rootfs/usr/local/bin/opsbox-entrypoint", "#!/bin/sh\n# updated\n")
+    env.image("cand", MANIFEST)
+    for version in ("1.0.0", "1.0.1", "1.0.2"):
+        env.image(f"reg/opsbox:{version}", MANIFEST)
+    result = env.run("cand", "reg/opsbox")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "v1.0.3\n"
+
+
+def test_a_taken_minor_moves_to_the_next_minor(env: Helpers) -> None:
+    """1.1.0 taken gives 1.2.0, not 1.1.1: X.Y only ever takes patches."""
+    env.tag("v1.0.0")
+    env.image("cand", "tool\tkubectl\t2.0.0\ndeb\tgit\t1:2.47.3-0+deb13u1\n")
+    env.image("reg/opsbox:1.0.0", MANIFEST)
+    env.image("reg/opsbox:1.1.0", MANIFEST)
+    result = env.run("cand", "reg/opsbox")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "v1.2.0\n"
+
+
+def test_registry_error_is_not_read_as_a_free_version(env: Helpers) -> None:
+    """Only "not found" about this image means free; any other error stops, printing no version."""
+    env.tag("v1.0.0")
+    env.commit("rootfs/usr/local/bin/opsbox-entrypoint", "#!/bin/sh\n# updated\n")
+    env.image("cand", MANIFEST)
+    env.image("reg/opsbox:1.0.0", MANIFEST)
+    env.image("reg/opsbox:1.0.1.error", "ERROR: unexpected status 500\n")
+    result = env.run("cand", "reg/opsbox")
+    assert result.returncode == 1
+    assert "cannot inspect reg/opsbox:1.0.1" in result.stderr
+    assert result.stdout == ""
+
+
+def test_another_not_found_is_not_read_as_a_free_version(env: Helpers) -> None:
+    """A missing credential helper says "not found" about an image that exists."""
+    env.tag("v1.0.0")
+    env.commit("rootfs/usr/local/bin/opsbox-entrypoint", "#!/bin/sh\n# updated\n")
+    env.image("cand", MANIFEST)
+    env.image("reg/opsbox:1.0.0", MANIFEST)
+    env.image("reg/opsbox:1.0.1.error", "ERROR: error getting credentials - err: exec: \"docker-credential-x\": executable file not found in $PATH, out: ``\n")
+    result = env.run("cand", "reg/opsbox")
+    assert result.returncode == 1
+    assert "cannot inspect reg/opsbox:1.0.1" in result.stderr
+    assert result.stdout == ""
+
+
+def test_no_release_due_never_asks_the_registry(env: Helpers) -> None:
+    """Nothing due is nothing due, whatever the registry would have said."""
+    env.tag("v1.0.0")
+    env.image("cand", MANIFEST)
+    env.image("reg/opsbox:1.0.0", MANIFEST)
+    env.image("reg/opsbox:1.0.1.error", "ERROR: unexpected status 500\n")
+    result = env.run("cand", "reg/opsbox")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+
+
+def test_only_if_newest_releases_the_newest_commit(env: Helpers) -> None:
+    """HEAD is where main is on GitHub, so the release goes ahead."""
+    env.tag("v1.0.0")
+    env.commit("rootfs/usr/local/bin/opsbox-entrypoint", "#!/bin/sh\n# updated\n")
+    env.main_on_github()
+    env.image("cand", MANIFEST)
+    env.image("reg/opsbox:1.0.0", MANIFEST)
+    result = env.run("--only-if-newest", "cand", "reg/opsbox")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "v1.0.1\n"
+
+
+def test_only_if_newest_releases_nothing_once_main_has_moved_on(env: Helpers) -> None:
+    """A merge while a run builds leaves that run with nothing to do.
+
+    GitHub refuses GITHUB_TOKEN a release at a commit whose workflow files
+    differ from main's, which a run found out only after tagging the image. The
+    next run on main releases both.
+    """
+    env.tag("v1.0.0")
+    env.commit("rootfs/usr/local/bin/opsbox-entrypoint", "#!/bin/sh\n# updated\n")
+    env.main_on_github("abcdef0" + "1" * 33)
+    env.image("cand", MANIFEST)
+    env.image("reg/opsbox:1.0.0", MANIFEST)
+    result = env.run("--only-if-newest", "cand", "reg/opsbox")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert "main has moved on to abcdef0" in result.stderr
+
+
+def test_without_only_if_newest_a_pull_request_still_gets_its_preview(env: Helpers) -> None:
+    """CI's preview runs on a pull request, which is never main's newest commit."""
+    env.tag("v1.0.0")
+    env.commit("rootfs/usr/local/bin/opsbox-entrypoint", "#!/bin/sh\n# a pull request\n")
+    env.image("cand", MANIFEST)
+    env.image("reg/opsbox:1.0.0", MANIFEST)
+    result = env.run("cand", "reg/opsbox")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "v1.0.1\n"
+
+
+def test_only_if_newest_needs_an_answer_from_github(env: Helpers) -> None:
+    """No answer isn't "newest": it stops before anything is tagged."""
+    env.tag("v1.0.0")
+    env.commit("rootfs/usr/local/bin/opsbox-entrypoint", "#!/bin/sh\n# updated\n")
+    env.image("cand", MANIFEST)
+    env.image("reg/opsbox:1.0.0", MANIFEST)
+    result = env.run("--only-if-newest", "cand", "reg/opsbox")
+    assert result.returncode == 1
+    assert "cannot read main from GitHub" in result.stderr
+    assert result.stdout == ""
+
+
+def test_only_if_newest_needs_a_commit_in_the_answer(env: Helpers) -> None:
+    """An answer that isn't a commit would read as "moved on", green, for good."""
+    env.tag("v1.0.0")
+    env.commit("rootfs/usr/local/bin/opsbox-entrypoint", "#!/bin/sh\n# updated\n")
+    env.main_on_github("null")
+    env.image("cand", MANIFEST)
+    env.image("reg/opsbox:1.0.0", MANIFEST)
+    result = env.run("--only-if-newest", "cand", "reg/opsbox")
+    assert result.returncode == 1
+    assert "GitHub gave no commit for main" in result.stderr
+    assert result.stdout == ""
+
+
+def test_an_error_from_the_rules_is_not_no_release_due(env: Helpers) -> None:
+    """The rules' error stops the run; read as nothing due, it would stay green."""
+    env.tag("v2.0.0")
+    env.image("cand", MANIFEST)
+    env.image("reg/opsbox:2.0.0", MANIFEST)
+    result = env.run("cand", "reg/opsbox")
+    assert result.returncode == 2
+    assert "below v2.0.0" in result.stderr
+    assert result.stdout == ""
 
 
 def test_wrong_arguments(env: Helpers) -> None:

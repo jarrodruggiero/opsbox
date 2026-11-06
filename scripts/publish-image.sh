@@ -24,13 +24,12 @@ Usage: scripts/${SCRIPT_NAME} REPOSITORY VERSION SOURCE...
 Joins the SOURCE images (one per architecture, as REPOSITORY@sha256:...)
 into one image and tags it X.Y.Z, X.Y, X and latest for VERSION (vX.Y.Z).
 
-A published version never changes. When REPOSITORY:X.Y.Z already exists
-with different images, this fails and tags nothing: a release build is never
-reproduced byte for byte, so a second run after a failure would otherwise
-replace what people pinned to X.Y.Z. When it exists with the same images
-(re-running a publish that failed after tagging), the tags are set again.
+A published version never changes. When REPOSITORY:X.Y.Z already exists, this
+fails and tags nothing. scripts/plan-release.sh has already moved past any
+version with an image, so reaching one here means something is wrong, and
+tagging it would replace what people pinned to X.Y.Z.
 
-Needs docker with buildx, and jq.
+Needs docker with buildx.
 EOF
 }
 
@@ -44,39 +43,18 @@ die() {
 # images
 # ---------------------------------------------------------------------------
 
-# platform_digests <ref> - print the digests of the images a reference
-# holds, one per line, sorted: an index's platform manifests (attestations,
-# whose platform is unknown, left out), or a single manifest's own digest.
-platform_digests() {
-  local ref="$1"
-  docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' \
-    | jq -r 'if .manifests then .manifests[] | select(.platform.os != "unknown") | .digest else .digest end' \
-    | sort
-}
-
-# existing_digests <ref> - like platform_digests, but print nothing when the
-# reference doesn't exist. Any other failure is fatal: reading a registry
-# error as "not published yet" would let this overwrite a release.
-existing_digests() {
+# is_published <ref> - return success when the reference exists. Any failure
+# but "not found" about this very image is fatal: a missing credential helper
+# also says "not found", and reading a failure as "not published yet" could
+# overwrite a release.
+is_published() {
   local ref="$1" output
-  if output="$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' 2>&1)"; then
-    platform_digests "$ref"
-  elif [[ "$output" == *"not found"* ]]; then
+  if output="$(docker buildx imagetools inspect "$ref" 2>&1)"; then
     return 0
-  else
-    die "cannot inspect $ref: $output"
+  elif [[ "$output" == *"$ref: not found"* ]]; then
+    return 1
   fi
-}
-
-# wanted_digests <source>... - print the platform digests of all the sources.
-# A pipeline's status is its last command's, and a loop's is its last pass's,
-# so each failure is turned into an exit on the spot: otherwise a failed
-# lookup of the first source would vanish behind the second's success.
-wanted_digests() {
-  local source
-  for source in "$@"; do
-    platform_digests "$source" || die "cannot inspect $source"
-  done | sort
+  die "cannot inspect $ref: $output"
 }
 
 # ---------------------------------------------------------------------------
@@ -97,11 +75,8 @@ main() {
   local major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" patch="${BASH_REMATCH[3]}"
   local exact="${repository}:${major}.${minor}.${patch}"
 
-  local existing wanted
-  existing="$(existing_digests "$exact")"
-  wanted="$(wanted_digests "$@")"
-  if [[ -n "$existing" && "$existing" != "$wanted" ]]; then
-    die "$exact is already published with different images, and a published version never changes. If an earlier publish tagged it and then failed, re-run that publish (it has the same images); otherwise finish that release by hand, at the commit it was built from."
+  if is_published "$exact"; then
+    die "$exact is already published, and a published version never changes."
   fi
 
   docker buildx imagetools create \
