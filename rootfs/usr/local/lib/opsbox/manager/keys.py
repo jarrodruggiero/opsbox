@@ -39,13 +39,14 @@ def home() -> Path:
     return Path(os.environ.get("HOME", "/home/opsbox"))
 
 
+# A hint only where the label doesn't already say what to paste.
 CATALOGUE: list[dict] = [
-    {"id": "kubernetes", "label": "Kubernetes", "hint": "A kubeconfig file."},
-    {"id": "talos", "label": "Talos", "hint": "A talosconfig file."},
+    {"id": "kubernetes", "label": "Kubernetes", "hint": ""},
+    {"id": "talos", "label": "Talos", "hint": ""},
     {"id": "github", "label": "GitHub", "hint": "A fine-grained personal access token."},
     {"id": "terraform", "label": "Terraform registry", "hint": "An app.terraform.io API token."},
-    {"id": "local-llm", "label": "Local LLM", "hint": "The llm.home API key."},
-    {"id": "ssh", "label": "SSH", "hint": "Generated on the box; copy the public key to where it's needed."},
+    {"id": "local-llm", "label": "Local LLM", "hint": ""},
+    {"id": "ssh", "label": "SSH", "hint": ""},
 ]
 
 PATHS: dict[str, str] = {
