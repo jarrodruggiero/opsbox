@@ -87,6 +87,25 @@ def identity(status: dict) -> tuple[str, str] | None:
     return None
 
 
+def problem(status: dict) -> str | None:
+    """What stops this sign-in starting Remote Control, in words, or None.
+
+    Only a claude.ai sign-in with no API key beside it can start it. Anything
+    else makes `claude remote-control` exit at once, and the supervisor would
+    restart it in a loop without ever saying why. The words match the
+    entrypoint's, which says the same for the remote-control command.
+    """
+    if status.get("loggedIn") is not True:
+        return "not signed in to Claude yet: sign in on the manager page"
+    if status.get("authMethod") == "claude.ai" and status.get("apiKeySource", "none") not in (None, "none"):
+        return (f"signed in, but an API key is set as well ({status['apiKeySource']}), "
+                "and Remote Control refuses that; remove it")
+    if identity(status) is None:
+        return (f"signed in with {status.get('authMethod') or 'an unknown method'}, which can't start "
+                "Remote Control; it needs a claude.ai sign-in")
+    return None
+
+
 def logout(config_dir: str | None = None, claude: str | None = None) -> None:
     """Run `claude auth logout`."""
     try:

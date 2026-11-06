@@ -51,6 +51,7 @@ def cmd_auth_status() -> int:
                     "orgId": "org-1",
                     "orgName": "Org",
                     "subscriptionType": "max",
+                    "apiKeySource": os.environ.get("FAKE_API_KEY_SOURCE", "none"),
                 }
             )
         )

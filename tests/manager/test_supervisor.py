@@ -231,3 +231,22 @@ def test_restart_is_immediate(fake_claude, setup_sign_in, tmp_path):
         return s["pid"] is not None and s["pid"] != old_pid
     until(new_pid, timeout=2)
     rc.stop()
+
+
+def test_an_api_key_beside_the_sign_in_is_named_not_looped(rc, monkeypatch):
+    """Remote Control refuses an API key, so the supervisor waits and says so once instead of restarting forever."""
+    monkeypatch.setenv("FAKE_API_KEY_SOURCE", "ANTHROPIC_API_KEY")
+    rc.start()
+    until(lambda: b"API key is set as well (ANTHROPIC_API_KEY)" in rc.console.output())
+    # Two more checks of the sign-in, which must not repeat the note.
+    for _ in range(2):
+        rc._wake.set()
+        time.sleep(0.3)
+    output = rc.console.output()
+    assert rc.status()["state"] == "signed-out"
+    assert output.count(b"API key is set as well") == 1
+    assert b"starting Remote Control" not in output
+
+    monkeypatch.delenv("FAKE_API_KEY_SOURCE")
+    rc._wake.set()
+    until(lambda: rc.status()["state"] == "running")
