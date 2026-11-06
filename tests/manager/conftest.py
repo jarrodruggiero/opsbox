@@ -1,9 +1,7 @@
 """Configure sys.path and provide a fake_claude fixture for tests."""
 from __future__ import annotations
 
-import os
 import pathlib
-import stat
 import sys
 import textwrap
 

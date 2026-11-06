@@ -1,7 +1,6 @@
 """Tests for ptyproc, claude, and the fake_claude fixture."""
 from __future__ import annotations
 
-import os
 import pathlib
 import time
 

@@ -7,8 +7,7 @@ import time
 
 import pytest
 
-from opsbox.manager import claude
-from opsbox.manager.supervisor import Console, RemoteControl, read_env_file
+from opsbox.manager.supervisor import Console, RemoteControl
 
 
 def until(predicate, timeout=10):

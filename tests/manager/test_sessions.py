@@ -1,20 +1,11 @@
-from __future__ import annotations
-
 """Tests for opsbox.manager.sessions."""
+from __future__ import annotations
 
 import hashlib
 import json
-import os
 import pathlib
-import sys
 import time
 
-import pytest
-
-# Put rootfs/usr/local/lib on sys.path so `from opsbox.manager import sessions` works.
-_repo_root = pathlib.Path(__file__).resolve().parents[2]
-_lib_path = _repo_root / "rootfs" / "usr" / "local" / "lib"
-sys.path.insert(0, str(_lib_path))
 
 from opsbox.manager.sessions import Sessions
 
