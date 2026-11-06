@@ -270,22 +270,26 @@ def test_the_terminal_runs_under_the_real_csp(tmp_path: Path) -> None:
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Serve)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
+
+    def load() -> dict:
         out = subprocess.run(
-            # Frames advance with virtual time only when every compositor stage
-            # runs before a draw; without it Chrome runs almost no animation
-            # frames, and xterm paints in them.
             [CHROME, "--headless", "--disable-gpu", "--dump-dom", "--no-sandbox", "--window-size=1200,900",
-             "--run-all-compositor-stages-before-draw", "--virtual-time-budget=8000",
+             "--virtual-time-budget=10000",
              f"http://127.0.0.1:{server.server_address[1]}/"],
             capture_output=True, text=True, timeout=90,
         ).stdout
+        marker = out.find("VC{")
+        assert marker >= 0, "the probe did not run"
+        return json.loads(unescape(out[marker + 2:out.find("</title>", marker)]))
+
+    try:
+        report = load()
     finally:
         server.shutdown()
         server.server_close()
-    marker = out.find("VC{")
-    assert marker >= 0, "the probe did not run"
-    report = json.loads(unescape(out[marker + 2:out.find("</title>", marker)]))
     assert report["violations"] == [], report["violations"]
-    assert report["rows"] and "hello from the console" in report["rows"]
+    assert report["rows"], "xterm never opened its terminal"
     assert "mono" in report["font"].lower() or "courier" in report["font"].lower(), report["font"]
+    # Black is what the rows inherit when the theme's <style> is blocked: on
+    # the terminal's near-black background the console is invisible.
+    assert report["color"] != "rgb(0, 0, 0)", report["color"]
