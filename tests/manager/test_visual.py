@@ -284,7 +284,12 @@ def in_a_real_browser(ctx: dict) -> tuple[dict, list[tuple[str, str, dict[str, s
         def log_message(self, *args: object) -> None:
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Serve)
+    class Server(http.server.ThreadingHTTPServer):
+        # As in the real one. A page load is a burst of connections, and the default
+        # of 5 can reset some: manager.js never arrives, and the probe never finishes.
+        request_queue_size = 128
+
+    server = Server(("127.0.0.1", 0), Serve)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         out = subprocess.run(
