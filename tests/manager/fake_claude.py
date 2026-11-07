@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import time
 
@@ -76,6 +77,60 @@ def cmd_auth_logout() -> int:
     return 0
 
 
+def repaint_forever(period: float) -> int:
+    """Draw the real CLI's status block as it does (2.1.308), every *period* seconds.
+
+    Every piece is a write of its own: cursor up, erase below, then each line.
+    SIGTERM gets its last words the same way, and they move relative to the
+    cursor, so anything else printed in the meantime throws them off.
+    FAKE_RC_REPAINT_CHANGES=1 changes a line each time.
+    """
+    changes = os.environ.get("FAKE_RC_REPAINT_CHANGES") == "1"
+    drawn = 0
+    tick = 0
+
+    def write(text: str) -> None:
+        os.write(1, text.encode())
+
+    def clear() -> None:
+        nonlocal drawn
+        if drawn:
+            write(f"\x1b[{drawn}A")
+            write("\x1b[J")
+            drawn = 0
+
+    def draw() -> None:
+        nonlocal drawn
+        clear()
+        lines = [
+            "\u00b7\u2714\ufe0e\u00b7 Connected \u00b7 workspace",
+            f"    Capacity: 1/32 \u00b7 tick {tick if changes else 0}",
+            "    \x1b]8;;https://claude.ai/code/session\x07opsbox-iterative-nebula\x1b]8;;\x07",
+            "",
+            "space to show QR code",
+        ]
+        for line in lines:
+            write(line + "\n")
+            drawn += 1
+
+    def last_words(signum, frame) -> None:
+        clear()
+        write("Shutting down 1 active session(s)\n")
+        draw()
+        time.sleep(0.1)
+        clear()
+        write("Environment preserved.\n")
+        draw()
+        clear()
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, last_words)
+    while True:
+        draw()
+        tick += 1
+        time.sleep(period)
+
+
 def cmd_remote_control() -> int:
     """Simulate `claude remote-control`.
 
@@ -84,6 +139,7 @@ def cmd_remote_control() -> int:
     same way. Then print a connected message and the env
     variable FAKE_SEEN so tests can verify the env file was applied.
     If FAKE_RC_EXIT_AFTER is set, sleep that many seconds and exit 3.
+    If FAKE_RC_REPAINT is set, repaint a status block that often (see above).
     Otherwise sleep in a loop until killed.
     """
     state_dir = _state_dir()
@@ -112,6 +168,10 @@ def cmd_remote_control() -> int:
     print("Remote Control connected", flush=True)
     print(f"env FAKE_SEEN={os.environ.get('FAKE_SEEN', '')}", flush=True)
     print(f"env TERM={os.environ.get('TERM', '')}", flush=True)
+
+    repaint = os.environ.get("FAKE_RC_REPAINT")
+    if repaint is not None:
+        return repaint_forever(float(repaint))
 
     exit_after = os.environ.get("FAKE_RC_EXIT_AFTER")
     if exit_after is not None:

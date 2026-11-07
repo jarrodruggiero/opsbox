@@ -6,6 +6,7 @@ import fcntl
 import os
 import pty
 import queue
+import select
 import shutil
 import signal
 import struct
@@ -13,10 +14,18 @@ import subprocess
 import sys
 import termios
 import threading
+import time
 
 
 # How much typed input may wait for a process that isn't reading it.
 MAX_PENDING_INPUT = 65536
+
+# A terminal program's one repaint is many writes: cursor up, erase, then line by
+# line. They're kept together until BURST_QUIET seconds pass with nothing more, so
+# a page can't draw the state in between, but for BURST_LIMIT seconds at most, so
+# steady output still arrives as it goes. Both too short for anyone to notice.
+BURST_QUIET = 0.015
+BURST_LIMIT = 0.05
 
 # Popen can't give a child its controlling terminal, and preexec_fn isn't safe
 # with threads, so this small shim takes it and then becomes the program. Without
@@ -83,11 +92,30 @@ class PtyProcess:
         threading.Thread(target=self._read_loop, daemon=True).start()
         threading.Thread(target=self._write_loop, daemon=True).start()
 
+    def _read_burst(self) -> bytes:
+        """One read, plus whatever follows it at once (see BURST_QUIET)."""
+        chunk = os.read(self._fd, 65536)
+        deadline = time.monotonic() + BURST_LIMIT
+        while chunk and len(chunk) < 65536:
+            wait = min(BURST_QUIET, deadline - time.monotonic())
+            if wait <= 0 or not select.select([self._fd], [], [], wait)[0]:
+                break
+            try:
+                more = os.read(self._fd, 65536)
+            except OSError:
+                # The process has gone. The next read says so again, and this
+                # way what it wrote last isn't lost.
+                break
+            if not more:
+                break
+            chunk += more
+        return chunk
+
     def _read_loop(self) -> None:
         """Read from the master fd, trim the buffer, and push chunks to subscribers."""
         while True:
             try:
-                chunk = os.read(self._fd, 65536)
+                chunk = self._read_burst()
             except OSError:
                 break
             if chunk == b"":

@@ -181,6 +181,64 @@ def test_problem_names_what_stops_remote_control() -> None:
     assert "signed in with api_key" in claude.problem({"loggedIn": True, "authMethod": "api_key"})
 
 
+def test_a_burst_of_small_writes_arrives_as_one_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A terminal program's one repaint is many writes, with the screen blank between two of them.
+
+    One message per write let the page draw that blank state: with a session
+    attached, Claude's status block flashed every second.
+    """
+    # Gaps a reader can't miss, or the pieces arrive together with no gathering at
+    # all, and a window that can't close on a busy machine.
+    monkeypatch.setattr(ptyproc, "BURST_QUIET", 0.5)
+    monkeypatch.setattr(ptyproc, "BURST_LIMIT", 2.0)
+    code = (
+        "import os,time\nfor piece in (b'up', b'erase', b'one', b'two'):\n"
+        "    os.write(1, piece)\n    time.sleep(0.02)\ntime.sleep(30)"
+    )
+    proc = ptyproc.PtyProcess([sys.executable, "-c", code])
+    stream = proc.subscribe()
+    proc.start()
+    try:
+        assert stream.get(timeout=10) == b"uperaseonetwo"
+    finally:
+        proc.terminate()
+
+
+def test_the_burst_window_is_short_but_there() -> None:
+    """Zero gathers nothing. Much longer and typing starts to feel late."""
+    assert 0 < ptyproc.BURST_QUIET < ptyproc.BURST_LIMIT <= 0.1
+
+
+def test_steady_output_isnt_held_back_until_it_stops() -> None:
+    """Output with no quiet gap in it still arrives as it goes, not all at the end."""
+    code = "import os,time\nfor _ in range(200):\n    os.write(1, b'x')\n    time.sleep(0.005)\ntime.sleep(30)"
+    proc = ptyproc.PtyProcess([sys.executable, "-c", code])
+    stream = proc.subscribe()
+    proc.start()
+    try:
+        chunks = []
+        while sum(map(len, chunks)) < 200:
+            chunks.append(stream.get(timeout=10))
+        assert len(chunks) >= 5, f"{len(chunks)} chunks"
+    finally:
+        proc.terminate()
+
+
+def test_a_flood_of_output_stays_in_small_chunks() -> None:
+    """A big `cat` must not gather into megabytes for a browser to take in one piece."""
+    code = "import os,time\nfor _ in range(64):\n    os.write(1, b'x' * 65536)\ntime.sleep(30)"
+    proc = ptyproc.PtyProcess([sys.executable, "-c", code])
+    stream = proc.subscribe()
+    proc.start()
+    try:
+        chunks = []
+        while sum(map(len, chunks)) < 64 * 65536:
+            chunks.append(stream.get(timeout=10))
+        assert max(map(len, chunks)) <= 2 * 65536
+    finally:
+        proc.terminate()
+
+
 def test_a_failed_start_leaks_no_descriptors(tmp_path: pathlib.Path) -> None:
     """A start that fails (no such directory) closes the pty pair it opened; a supervisor retrying it must not run out of fds."""
     import os
