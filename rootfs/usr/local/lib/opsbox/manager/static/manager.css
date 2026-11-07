@@ -1,10 +1,12 @@
-/* The manager page. Tokens and direction from Stocktake's "deep glass": a washed
-   ground, translucent panels, one gradient on the action that matters. The six
-   spacing steps and the type scale are used everywhere, rather than a margin per
-   rule, which is what keeps the page from looking assembled.
+/* The manager page. Direction from Stocktake's "deep glass": a washed ground,
+   translucent panels, one gradient on the action that matters. The six spacing
+   steps and the type scale are used everywhere, rather than a margin per rule,
+   which is what keeps the page from looking assembled.
 
-   The accent is indigo because the owner is deutan: it's the one region that
-   stays apart from the status colours for him. Status always has a word too. */
+   The colours are its own, teal on graphite, so it doesn't read as Stocktake. The
+   owner is deutan, and of the accents measured under a deuteranopia simulation,
+   teal is the one clearly apart from both Stocktake's indigo and the status
+   colours for him. Status always has a word too. */
 
 :root {
   /* Native controls too: an unticked checkbox stays white on a dark page without it. */
@@ -28,36 +30,36 @@
   --control-small: 1.875rem;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 
-  --bg: #eef0f7;
+  --bg: #eef1f1;
   --panel: rgb(255 255 255 / 0.74);
-  --panel-solid: #f7f8fc;
-  --sunken: #e7eaf4;
+  --panel-solid: #f7f9f9;
+  --sunken: #e6ebeb;
   --chrome: rgb(255 255 255 / 0.92);
-  --text: #1a1d29;
-  --muted: #5f6579;
-  --line: rgb(24 24 60 / 0.1);
+  --text: #1b2023;
+  --muted: #5a656a;
+  --line: rgb(20 40 44 / 0.12);
   --up: #1a7f37;
   --down: #c62828;
   --warn: #a16207;
   --danger: #c62828;
-  --shadow-sm: 0 1px 2px rgb(24 20 60 / 0.06);
-  --shadow: 0 10px 30px rgb(24 20 60 / 0.1);
+  --shadow-sm: 0 1px 2px rgb(15 30 34 / 0.06);
+  --shadow: 0 10px 30px rgb(15 30 34 / 0.1);
   --on-accent: #fff;
-  --accent: #4338ca;
-  --accent-grad: linear-gradient(135deg, #4f46e5, #7c3aed);
+  --accent: #0f766e;
+  --accent-grad: linear-gradient(135deg, #115e59, #0f766e);
   --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
   --wash: radial-gradient(1200px 460px at 18% -12%, color-mix(in srgb, var(--accent) 20%, transparent) 0%, transparent 68%);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0d1018;
-    --panel: rgb(28 33 50 / 0.72);
-    --panel-solid: #1b2030;
-    --sunken: #141826;
-    --chrome: rgb(20 24 38 / 0.88);
-    --text: #e9ecf6;
-    --muted: #98a0bb;
+    --bg: #0e1214;
+    --panel: rgb(31 37 40 / 0.72);
+    --panel-solid: #1c2225;
+    --sunken: #14191b;
+    --chrome: rgb(20 25 27 / 0.88);
+    --text: #e8edee;
+    --muted: #98a4a8;
     --line: rgb(255 255 255 / 0.09);
     --up: #2ea043;
     --down: #f25050;
@@ -65,10 +67,10 @@
     --danger: #dc2626;
     --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
     --shadow: 0 16px 44px rgb(0 0 0 / 0.5);
-    /* White on the lifted indigo measures under 3:1; this is over 7:1. */
-    --on-accent: #0d1018;
-    --accent: #8b83f0;
-    --accent-grad: linear-gradient(135deg, #8b83f0, #b78af5);
+    /* White on the lifted teal measures under 2:1; this is over 7:1. */
+    --on-accent: #0b0f11;
+    --accent: #2dd4bf;
+    --accent-grad: linear-gradient(135deg, #2dd4bf, #5eead4);
   }
 }
 
@@ -373,13 +375,13 @@ button.tab[aria-selected="true"] { background: var(--panel-solid); color: var(--
   height: clamp(18rem, 58vh, 38rem);
   margin-top: var(--sp-3);
   padding: var(--sp-2) var(--sp-1) var(--sp-2) var(--sp-3);
-  background: #0b0e14;
+  background: #0b0f11;
   border-radius: var(--radius-sm);
 }
 .terminal { width: 100%; height: 100%; overflow: hidden; }
 /* xterm's own stylesheet paints this black, which shows as a stripe under the
    last row. */
-#console .terminal .xterm .xterm-viewport { background-color: #0b0e14; }
+#console .terminal .xterm .xterm-viewport { background-color: #0b0f11; }
 
 /* ── what happened ─────────────────────────────────────────────────────── */
 
