@@ -200,4 +200,5 @@ def test_a_name_too_long_for_the_filesystem_is_refused(home: pathlib.Path) -> No
     """Counted in bytes: 100 characters can be 300, and past 255 even asking whether it exists raises."""
     with pytest.raises(Refused, match="too long"):
         files.save("~/" + "\u3042" * 100, b"data")
-    assert files.save("~/" + "\u3042" * 85, b"data") == "~/" + "\u3042" * 85
+    # Room to spare: the save goes through a temporary file named after this one.
+    assert files.save("~/" + "\u3042" * 75, b"data") == "~/" + "\u3042" * 75
