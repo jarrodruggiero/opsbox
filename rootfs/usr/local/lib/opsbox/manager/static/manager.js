@@ -123,37 +123,222 @@
     });
   });
 
-  var fileInput = document.getElementById("file-input");
-  var filePath = document.getElementById("file-path");
+  /* ── uploading: any number of files, each its own request ──────────────── */
 
-  // Replace knows where the file goes, so choosing one is the last step.
-  var replacing = false;
+  var uploadForm = document.getElementById("upload-form");
 
-  document.querySelectorAll("[data-replace]").forEach(function (button) {
-    button.addEventListener("click", function () {
-      filePath.value = button.dataset.replace;
-      replacing = true;
+  if (uploadForm) {
+    // More than this is more likely the wrong folder than a plan.
+    var MAX_PICK = 1000;
+    var fileInput = document.getElementById("file-input");
+    var filePath = document.getElementById("file-path");
+    var pathLabel = document.getElementById("path-label");
+    var pickedText = document.getElementById("file-picked");
+    var uploadButton = uploadForm.querySelector("button.primary");
+    var folderInput = document.createElement("input");
+    var nothingPicked = pickedText.textContent;
+    var pathWord = pathLabel.textContent;
+    var pathExample = filePath.placeholder;
+    var picked = [];
+    var pickedFolder = false;
+    var suggested = "";
+    var replacing = false;
+    var uploading = false;
+
+    // A browser's dialog picks files or a folder, never both, so there are two.
+    // No name on this one: what's sent is put together below, a file at a time.
+    folderInput.type = "file";
+    folderInput.webkitdirectory = true;
+    folderInput.hidden = true;
+    uploadForm.appendChild(folderInput);
+    fileInput.multiple = true;
+    fileInput.required = false;
+    filePath.required = false;
+    fileInput.hidden = true;
+    document.getElementById("file-pickers").hidden = false;
+    var fileLabel = document.querySelector('label[for="file-input"]');
+    fileLabel.htmlFor = "choose-files";
+    fileLabel.textContent = "Files";
+
+    var forget = function () {
+      picked = [];
+      pickedFolder = false;
+      suggested = "";
+      filePath.value = "";
+      fileInput.value = "";
+      folderInput.value = "";
+      pickedText.textContent = nothingPicked;
+      pathLabel.textContent = pathWord;
+      filePath.placeholder = pathExample;
+    };
+
+    var choose = function (list, fromFolder) {
+      var files = Array.prototype.slice.call(list);
+      if (files.length > MAX_PICK) {
+        notice("That's " + files.length + " files, and the page takes " + MAX_PICK + " at a time.", true);
+        forget();
+        return;
+      }
+      picked = files;
+      pickedFolder = fromFolder;
+      var one = files.length === 1 && !fromFolder;
+      var count = files.length + (files.length === 1 ? " file" : " files");
+      pickedText.textContent = one ? files[0].name
+        : fromFolder ? files[0].webkitRelativePath.split("/")[0] + ": " + count : count;
+      // One file's path is the file's own. Otherwise it's the folder they go in.
+      pathLabel.textContent = one ? pathWord : "Folder on the box";
+      filePath.placeholder = one ? pathExample : "~/.kube/";
+      // Typed over, the path is the person's. Otherwise it follows what's chosen.
+      if (!filePath.value || filePath.value === suggested) {
+        suggested = one ? "~/" + files[0].name : "~/";
+        filePath.value = suggested;
+      }
+      filePath.focus();
+    };
+
+    var targetOf = function (file) {
+      if (picked.length === 1 && !pickedFolder) { return filePath.value; }
+      var folder = filePath.value.trim() || "~/";
+      if (folder.slice(-1) !== "/") { folder += "/"; }
+      return folder + (file.webkitRelativePath || file.name);
+    };
+
+    // In place, so that the terminal and its scrollback stay where they are.
+    var redrawList = function () {
+      fetch("/").then(function (response) {
+        return response.ok ? response.text() : null;
+      }).then(function (page) {
+        if (!page) { return; }
+        var list = "#files .rows, #files .empty";
+        var fresh = new DOMParser().parseFromString(page, "text/html").querySelector(list);
+        var current = document.querySelector(list);
+        if (fresh && current) { current.replaceWith(fresh); }
+      }).catch(function () {});
+    };
+
+    var uploadAll = function () {
+      var label = uploadButton.textContent;
+      var limit = Number(uploadForm.dataset.maxFile);
+      var jobs = picked.map(function (file) { return { file: file, path: targetOf(file) }; });
+      var refused = [];
+      var done = 0;
+      var stopped = false;
+      uploading = true;
+      uploadButton.disabled = true;
+
+      var finish = function () {
+        uploading = false;
+        uploadButton.disabled = false;
+        uploadButton.textContent = label;
+        if (!refused.length) {
+          notice(jobs.length === 1 ? "Uploaded." : "Uploaded " + jobs.length + " files.");
+        } else {
+          var more = refused.length > 3 ? " And " + (refused.length - 3) + " more." : "";
+          notice((done ? "Uploaded " + done + " of " + jobs.length + ". " : "") + refused.slice(0, 3).join(" ") + more, true);
+        }
+        // With nothing saved the choice stays, so that the path can be corrected.
+        if (done) {
+          forget();
+          redrawList();
+        }
+      };
+
+      var send = function (job) {
+        var body = new FormData();
+        body.append("csrf", csrf);
+        body.append("path", job.path);
+        if (pickedFolder) { body.append("folder", "1"); }
+        body.append("file", job.file);
+        return fetch(uploadForm.action, {
+          method: "POST",
+          body: body,
+          headers: { "X-Opsbox-Fetch": "1" }
+        }).then(function (response) {
+          if (response.ok) {
+            done += 1;
+            return null;
+          }
+          // Signed out: every other file would only fail the same way.
+          stopped = response.status === 403;
+          return response.text().then(function (text) {
+            var why = text;
+            try { why = JSON.parse(text).error || text; } catch (err) { why = text; }
+            refused.push(job.path + ": " + why);
+          });
+        }).catch(function () {
+          refused.push(job.path + ": Couldn't be sent.");
+        });
+      };
+
+      var next = function (index) {
+        if (index >= jobs.length || stopped) {
+          finish();
+          return;
+        }
+        uploadButton.textContent = "Uploading " + (index + 1) + " of " + jobs.length + "\u2026";
+        var job = jobs[index];
+        // Not sent: it would only be refused, after all of it had gone.
+        if (job.file.size > limit) {
+          refused.push(job.path + ": That file is over the " + limit / 1048576 + " MiB limit.");
+          next(index + 1);
+          return;
+        }
+        send(job).then(function () { next(index + 1); });
+      };
+      next(0);
+    };
+
+    document.getElementById("choose-files").addEventListener("click", function () {
       // So that choosing the same file again still counts as a change.
       fileInput.value = "";
       fileInput.click();
     });
-  });
+    document.getElementById("choose-folder").addEventListener("click", function () {
+      folderInput.value = "";
+      folderInput.click();
+    });
 
-  if (fileInput && filePath) {
+    // Replace knows where the file goes, so choosing one is the last step. On the
+    // document, because uploading redraws the list these buttons are in.
+    document.addEventListener("click", function (event) {
+      var button = event.target.closest("[data-replace]");
+      if (!button || uploading) { return; }
+      filePath.value = button.dataset.replace;
+      replacing = true;
+      fileInput.multiple = false;
+      fileInput.value = "";
+      fileInput.click();
+    });
+
     fileInput.addEventListener("cancel", function () {
       // Not left in the field, where the next file chosen would overwrite it.
       if (replacing) { filePath.value = ""; }
       replacing = false;
+      fileInput.multiple = true;
     });
     fileInput.addEventListener("change", function () {
       if (!fileInput.files.length) { return; }
       if (replacing) {
         replacing = false;
-        fileInput.form.requestSubmit();
+        fileInput.multiple = true;
+        picked = [fileInput.files[0]];
+        pickedFolder = false;
+        uploadForm.requestSubmit();
         return;
       }
-      if (!filePath.value) { filePath.value = "~/" + fileInput.files[0].name; }
-      filePath.focus();
+      choose(fileInput.files, false);
+    });
+    folderInput.addEventListener("change", function () {
+      if (folderInput.files.length) { choose(folderInput.files, true); }
+    });
+
+    uploadForm.addEventListener("submit", function (event) {
+      event.preventDefault();
+      if (picked.length) {
+        uploadAll();
+      } else {
+        fileInput.click();
+      }
     });
   }
 

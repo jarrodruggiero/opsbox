@@ -847,7 +847,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         data = fields.get("file", b"")
         try:
-            if not data:
+            # Alone, an empty file is more likely a mistake that would replace a
+            # good one. From a folder, it's part of the folder.
+            if not data and not fields.get("folder"):
                 raise keys.Refused("That file is empty.")
             files.save(fields.get("path", b"").decode("utf-8", errors="replace"), data)
         except keys.Refused as refused:

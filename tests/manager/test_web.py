@@ -283,6 +283,29 @@ def test_upload_refusals_say_why_on_the_page(box) -> None:
     assert box.manager.owner() == ("me@example.com", "org-1"), "an upload reached the owner file"
 
 
+def test_an_empty_file_is_refused_alone_and_kept_from_a_folder(box) -> None:
+    """Alone it's more likely a mistake that would replace a good file. In a folder it's part of it."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    refused = browser.upload("~/.kube/config", b"", fields={"folder": ""})
+    assert refused.status == 400
+    assert "empty" in context_of(refused)["error"]
+    assert not (box.home / ".kube/config").exists()
+    assert browser.upload("~/copy/sub/__init__.py", b"", fields={"folder": "1"}).status == 303
+    assert (box.home / "copy/sub/__init__.py").read_bytes() == b""
+
+
+def test_an_upload_from_the_page_s_script_gets_its_answer_as_data(box) -> None:
+    """Each file of many, so that one refusal can name its file and the rest can go on."""
+    browser = Browser(box.port)
+    assert sign_in(browser).status == 303
+    assert browser.upload("~/many/one", b"1", headers={"X-Opsbox-Fetch": "1"}).status == 204
+    assert (box.home / "many/one").read_bytes() == b"1"
+    refused = browser.upload("~/.config/opsbox/x", b"1", headers={"X-Opsbox-Fetch": "1"})
+    assert refused.status == 400
+    assert json.loads(refused.body)["error"] == "That's where the manager keeps its own files."
+
+
 def test_upload_that_isnt_multipart_is_refused(box) -> None:
     browser = Browser(box.port)
     assert sign_in(browser).status == 303

@@ -278,6 +278,10 @@ button.small { min-height: var(--control-small); padding: 0 0.7rem; font-size: v
 }
 .fieldrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(10rem, 100%), 1fr)); gap: var(--sp-3); }
 .field { min-width: 0; }
+.pickers { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.picked { min-width: 0; color: var(--muted); font-size: var(--fs-small); overflow-wrap: anywhere; }
+/* A whole folder can be hundreds of rows. */
+#files .rows { max-height: 24rem; overflow-y: auto; }
 label { display: block; margin-bottom: var(--sp-1); font-size: var(--fs-small); font-weight: 600; }
 input, textarea {
   width: 100%;
