@@ -45,11 +45,16 @@ def detail_line(rc: dict) -> str:
     return " \u00b7 ".join(parts)
 
 
+# A repaint: back up to where the last one started, erase from there down, draw.
+REPAINT = re.compile(rb"\x1b\[\d+A\x1b\[J")
+
+
 class Console:
     """What the page's terminal window shows: Remote Control's output and the manager's notes."""
 
     def __init__(self, *, keep_bytes: int = 262144) -> None:
         self._buffer: bytearray = bytearray()
+        self._last_fed = b""
         self._keep_bytes = keep_bytes
         self._lock = threading.Lock()
         self._subscribers: list[queue.Queue[bytes | None]] = []
@@ -69,6 +74,12 @@ class Console:
     def feed(self, data: bytes) -> None:
         """Append data, trim from the front, and push to subscribers."""
         with self._lock:
+            # With a session attached, Claude repaints its status block every
+            # second. The same repaint with nothing since changes nothing on
+            # screen, and would fill the reload history and `docker logs`.
+            if data == self._last_fed and REPAINT.match(data):
+                return
+            self._last_fed = data
             self._buffer.extend(data)
             if len(self._buffer) > self._keep_bytes:
                 self._buffer = self._buffer[len(self._buffer) - self._keep_bytes :]
@@ -174,14 +185,17 @@ class RemoteControl:
             self._wake.set()
 
     def stop(self) -> None:
-        """Stop the loop and terminate the current process."""
+        """Stop the loop and terminate the current process.
+
+        The loop notes it when it ends: the process's last words move relative
+        to the cursor, so a note now would put them in the wrong place.
+        """
         with self._lock:
             self._want = False
             if self._proc is not None and self._proc.running():
                 self._proc.terminate()
             self.state = "stopped"
             self.question = None
-        self.console.note("stopped")
         self._wake.set()
 
     def restart(self) -> bool:
@@ -196,9 +210,11 @@ class RemoteControl:
                 return False
             if running:
                 self._restart_now = True
-        self.console.note("restarting")
+        # As for stop: with a process to end, the loop notes it once it has gone.
         if running:
             self._proc.terminate()
+        else:
+            self.console.note("restarting")
         self._wake.set()
         return True
 
@@ -355,10 +371,12 @@ class RemoteControl:
             with self._lock:
                 if not self._want:
                     break
-                if self._restart_now:
-                    self._restart_now = False
+                restart_now, self._restart_now = self._restart_now, False
+                if restart_now:
                     self.restarts += 1
-                    continue
+            if restart_now:
+                self.console.note("restarting")
+                continue
 
             # A run that lasted counts as recovered, so the next wait starts short
             # again. Otherwise wait the current delay, then double it for next time.
@@ -376,3 +394,5 @@ class RemoteControl:
 
             with self._lock:
                 self.restarts += 1
+
+        self.console.note("stopped")

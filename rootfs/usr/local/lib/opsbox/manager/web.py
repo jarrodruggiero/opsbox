@@ -379,6 +379,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # it, a thousand idle connections from one LAN host hold a thousand threads
     # and the page stops answering. The console's keepalive comes every 15.
     timeout = 30
+    # A console message mustn't wait for the last one to be acknowledged, which a
+    # client can take up to 200 ms over, or keystrokes echo late and output stutters.
+    disable_nagle_algorithm = True
 
     # -- logging -----------------------------------------------------------
 

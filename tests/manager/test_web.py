@@ -831,3 +831,8 @@ def test_a_code_after_the_cli_has_gone_says_start_again(box) -> None:
     assert resp.status == 400
     assert "has ended" in context_of(resp)["error"]
     assert box.manager.login is None
+
+
+def test_the_stream_doesnt_wait_on_small_writes() -> None:
+    """With Nagle's algorithm a console message can wait up to 200 ms for the last one's ack."""
+    assert web.Handler.disable_nagle_algorithm is True

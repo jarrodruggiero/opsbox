@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from opsbox.manager import ptyproc
 from opsbox.manager.supervisor import MIN_COLS, MIN_ROWS, Console, RemoteControl, pending_question
 
 
@@ -47,6 +48,117 @@ def rc(setup_sign_in, fake_claude, tmp_path):
     (tmp_path / "workdir").mkdir()
     yield rc
     rc.stop()
+
+
+FRAME = b"\x1b[2A\x1b[Jone\r\ntwo\r\n"
+
+
+@pytest.mark.parametrize("frame", [FRAME, FRAME.replace(b"[2A", b"[35A")])
+def test_the_same_repaint_again_is_dropped(frame):
+    """Nothing changes on screen, and it would cost the log and the reload history every second."""
+    console = Console()
+    viewer = console.subscribe()
+    console.feed(frame)
+    console.feed(frame)
+    assert console.output() == frame
+    assert viewer.get_nowait() == frame
+    assert viewer.empty()
+
+
+def test_a_changed_repaint_is_kept():
+    console = Console()
+    console.feed(FRAME)
+    console.feed(FRAME.replace(b"two", b"2"))
+    assert console.output() == FRAME + FRAME.replace(b"two", b"2")
+
+
+@pytest.mark.parametrize("line", [b"ok\r\n", b"\x1b[1Aok\r\n"])
+def test_repeated_output_that_isnt_a_repaint_is_kept(line):
+    """The same line twice is two lines, and without the erase it isn't known to be a redraw."""
+    console = Console()
+    console.feed(line)
+    console.feed(line)
+    assert console.output() == line + line
+
+
+def test_a_repaint_after_something_else_is_kept():
+    """Something else moved the cursor, so this repaint lands elsewhere."""
+    console = Console()
+    console.feed(FRAME)
+    console.note("hello")
+    console.feed(FRAME)
+    assert console.output().count(FRAME) == 2
+
+
+def test_a_changing_repaint_reaches_the_console_in_one_piece(rc, monkeypatch):
+    """Erased and redrawn in the same chunk, so a page can't draw the block blank."""
+    monkeypatch.setenv("FAKE_RC_REPAINT", "0.15")
+    monkeypatch.setenv("FAKE_RC_REPAINT_CHANGES", "1")
+    monkeypatch.setattr(ptyproc, "BURST_QUIET", 0.05)
+    viewer = rc.console.subscribe()
+    rc.start()
+    until(lambda: rc.console.output().count(b"\x1b[J") >= 4)
+    chunks = []
+    while not viewer.empty():
+        chunks.append(viewer.get_nowait())
+    erasing = [chunk for chunk in chunks if b"\x1b[J" in chunk]
+    assert len(erasing) >= 3
+    assert all(b"space to show QR code" in chunk for chunk in erasing), erasing[:3]
+
+
+def test_an_unchanged_repaint_costs_the_console_nothing(rc, monkeypatch):
+    """With a session attached the real CLI repaints every second, and this is what stays quiet."""
+    monkeypatch.setenv("FAKE_RC_REPAINT", "0.1")
+    monkeypatch.setattr(ptyproc, "BURST_QUIET", 0.04)
+    rc.start()
+    until(lambda: b"space to show QR code" in rc.console.output())
+    time.sleep(1)
+    # The first drawing has nothing to erase, so it differs from the second.
+    assert rc.console.output().count(b"space to show QR code") <= 3
+
+
+def test_stop_is_noted_after_the_process_s_last_words(rc, monkeypatch):
+    """They move relative to the cursor, so a note before them would put them in the wrong place."""
+    monkeypatch.setenv("FAKE_RC_REPAINT", "5")
+    rc.start()
+    until(lambda: b"space to show QR code" in rc.console.output())
+    rc.stop()
+    until(lambda: b"[opsbox] stopped" in rc.console.output())
+    output = rc.console.output()
+    assert output.index(b"Environment preserved") < output.index(b"[opsbox] stopped")
+
+
+def test_restart_is_noted_after_the_process_s_last_words(rc, monkeypatch):
+    monkeypatch.setenv("FAKE_RC_REPAINT", "5")
+    rc.start()
+    until(lambda: b"space to show QR code" in rc.console.output())
+    assert rc.restart()
+    until(lambda: b"[opsbox] restarting" in rc.console.output())
+    output = rc.console.output()
+    assert output.index(b"Environment preserved") < output.index(b"[opsbox] restarting")
+
+
+def test_restart_during_a_wait_is_noted_at_once(rc, monkeypatch):
+    """No process to wait for here, and the wait itself may be long."""
+    monkeypatch.setenv("FAKE_RC_EXIT_AFTER", "0")
+    rc.start()
+    until(lambda: rc.status()["state"] == "backing-off")
+    monkeypatch.delenv("FAKE_RC_EXIT_AFTER")
+    assert rc.restart()
+    assert b"[opsbox] restarting" in rc.console.output()
+
+
+def test_stop_with_nothing_running_is_noted_once(fake_claude, tmp_path):
+    """Signed out there is no process to wait for, and it still says so."""
+    env_file = tmp_path / "env"
+    env_file.write_text("")
+    rc = RemoteControl(Console(), workdir=str(tmp_path), args=[], env_file=env_file, claude=str(fake_claude))
+    rc.start()
+    until(lambda: rc.status()["state"] == "signed-out")
+    rc.stop()
+    until(lambda: b"[opsbox] stopped" in rc.console.output())
+    time.sleep(0.2)
+    assert rc.console.output().count(b"[opsbox] stopped") == 1
 
 
 def test_waits_while_signed_out(fake_claude, tmp_path):
