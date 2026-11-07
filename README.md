@@ -115,9 +115,11 @@ above).
 `~/.claude/skills` up to date from it, so Restart picks up a changed skill. It
 uses the box's own credentials. For SSH that's the key from the manager page,
 added to the repository as a deploy key; GitHub's host keys are already in the
-image. It only ever fast-forwards: changes on the box, another branch, or
-commits the repository doesn't have are left alone, and the console says so.
-claude.ai's own `synced/` folder stays where it is.
+image. The repository needs a `main` branch, and nothing in a `synced/` folder:
+that's where claude.ai keeps its own skills, so a repository with files there is
+refused rather than let git replace them. It only ever fast-forwards: changes on
+the box, another branch, or commits the repository doesn't have are left alone,
+and the console says so.
 
 The volume must be owned by uid 1000: `mkdir -m 0700 home && sudo chown
 1000:1000 home`. On every start the entrypoint takes away other users' access

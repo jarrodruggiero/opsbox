@@ -84,7 +84,9 @@ def test_work_on_this_box_is_never_overwritten(library: dict, how: str) -> None:
     skills.sync(library["env"], library["home"])
     dest = library["dest"]
     if how == "edited":
-        (dest / "qwen-spec/SKILL.md").write_text("mine\n")
+        # Somewhere the next change doesn't touch, so only the check for changes can stop it.
+        (dest / "mine").mkdir()
+        (dest / "mine/SKILL.md").write_text("mine\n")
     elif how == "branch":
         git(dest, "switch", "-q", "-c", "opsbox/qwen-spec")
     else:
@@ -92,9 +94,14 @@ def test_work_on_this_box_is_never_overwritten(library: dict, how: str) -> None:
         git(dest, "commit", "-q", "-am", "mine")
     push_from_other(library, "two\n")
     note = skills.sync(library["env"], library["home"])
-    assert note is not None and "not updated" in note
-    expected = "one\n" if how == "branch" else "mine\n"
-    assert (dest / "qwen-spec/SKILL.md").read_text() == expected
+    if how == "commit":
+        assert note == "skills: not updated, because ~/.claude/skills has commits that main doesn't"
+        assert (dest / "qwen-spec/SKILL.md").read_text() == "mine\n"
+    else:
+        assert note == "skills: not updated, because ~/.claude/skills has changes or is on another branch"
+        assert (dest / "qwen-spec/SKILL.md").read_text() == "one\n"
+    if how == "edited":
+        assert (dest / "mine/SKILL.md").read_text() == "mine\n"
 
 
 def test_a_checkout_of_something_else_is_left_alone(library: dict, tmp_path: pathlib.Path) -> None:
@@ -139,3 +146,72 @@ def test_git_never_waits_for_a_password_or_a_host_key(library: dict, monkeypatch
     skills.sync(library["env"], library["home"])
     assert seen["GIT_TERMINAL_PROMPT"] == "0"
     assert "BatchMode=yes" in seen["GIT_SSH_COMMAND"]
+
+
+def test_a_timeout_in_the_first_checkout_leaves_nothing_to_block_the_next(library: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = subprocess.run
+
+    def slow_fetch(args, **kwargs):
+        if "fetch" in args:
+            raise subprocess.TimeoutExpired(args, skills.TIMEOUT)
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(skills.subprocess, "run", slow_fetch)
+    note = skills.sync(library["env"], library["home"])
+    assert note is not None and "took too long" in note
+    assert not (library["dest"] / ".git").exists()
+    monkeypatch.setattr(skills.subprocess, "run", real)
+    assert skills.sync(library["env"], library["home"]).startswith("skills: checked out")
+
+
+def test_a_checkout_left_half_made_is_started_again(library: dict) -> None:
+    """Say the manager stopped mid-way: a repository with no commit is no one's work."""
+    library["dest"].mkdir(parents=True)
+    git(library["dest"], "init", "-q", "-b", "main")
+    git(library["dest"], "remote", "add", "origin", library["url"])
+    assert skills.sync(library["env"], library["home"]).startswith("skills: checked out")
+    assert (library["dest"] / "qwen-spec/SKILL.md").exists()
+
+
+@pytest.mark.parametrize("when", ["first", "update"])
+def test_a_library_with_files_in_synced_is_refused(library: dict, when: str) -> None:
+    """Git treats ignored files as expendable, so it would overwrite claude.ai's, then delete them."""
+    if when == "update":
+        skills.sync(library["env"], library["home"])
+    (library["dest"] / "synced/docx").mkdir(parents=True)
+    (library["dest"] / "synced/docx/SKILL.md").write_text("theirs\n")
+    other = library["other"]
+    (other / "synced/docx").mkdir(parents=True)
+    (other / "synced/docx/SKILL.md").write_text("upstream\n")
+    git(other, "add", "-f", "synced/docx/SKILL.md")
+    git(other, "commit", "-q", "-m", "a file where claude.ai keeps its own")
+    git(other, "push", "-q", "origin", "main")
+    note = skills.sync(library["env"], library["home"])
+    assert note is not None and "synced/" in note
+    assert (library["dest"] / "synced/docx/SKILL.md").read_text() == "theirs\n"
+
+
+def test_claude_ai_s_skills_dont_count_as_changes_even_unignored(library: dict) -> None:
+    """A library that doesn't ignore synced/ still updates."""
+    other = library["other"]
+    git(other, "rm", "-q", ".gitignore")
+    git(other, "commit", "-q", "-m", "no ignore file")
+    git(other, "push", "-q", "origin", "main")
+    skills.sync(library["env"], library["home"])
+    (library["dest"] / "synced/docx").mkdir(parents=True)
+    (library["dest"] / "synced/docx/SKILL.md").write_text("theirs\n")
+    new = push_from_other(library, "two\n")
+    assert skills.sync(library["env"], library["home"]) == f"skills: updated to {new[:7]}"
+
+
+def test_a_token_in_the_url_never_reaches_the_console(library: dict) -> None:
+    """The page hides a setting with one, and the console is on the page."""
+    env = {**library["env"], skills.SETTING: "https://x-access-token:ghp_secret123@127.0.0.1:9/x.git"}
+    note = skills.sync(env, library["home"])
+    assert note is not None and "ghp_secret123" not in note
+    assert "***@127.0.0.1" in note
+
+
+def test_a_setting_that_looks_like_an_option_is_refused(library: dict) -> None:
+    env = {**library["env"], skills.SETTING: "--upload-pack=touch /tmp/x"}
+    assert skills.sync(env, library["home"]) == f"skills: {skills.SETTING} must be a repository's URL"
