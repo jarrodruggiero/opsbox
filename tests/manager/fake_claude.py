@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -140,6 +141,7 @@ def cmd_remote_control() -> int:
     variable FAKE_SEEN so tests can verify the env file was applied.
     If FAKE_RC_EXIT_AFTER is set, sleep that many seconds and exit 3.
     If FAKE_RC_REPAINT is set, repaint a status block that often (see above).
+    If FAKE_RC_LEAVE_BEHIND is set, leave a job that long holding the terminal.
     Otherwise sleep in a loop until killed.
     """
     state_dir = _state_dir()
@@ -168,6 +170,10 @@ def cmd_remote_control() -> int:
     print("Remote Control connected", flush=True)
     print(f"env FAKE_SEEN={os.environ.get('FAKE_SEEN', '')}", flush=True)
     print(f"env TERM={os.environ.get('TERM', '')}", flush=True)
+
+    leave_behind = os.environ.get("FAKE_RC_LEAVE_BEHIND")
+    if leave_behind is not None:
+        subprocess.Popen(["sleep", leave_behind], start_new_session=True)
 
     repaint = os.environ.get("FAKE_RC_REPAINT")
     if repaint is not None:

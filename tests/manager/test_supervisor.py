@@ -72,13 +72,38 @@ def test_a_changed_repaint_is_kept():
     assert console.output() == FRAME + FRAME.replace(b"two", b"2")
 
 
-@pytest.mark.parametrize("line", [b"ok\r\n", b"\x1b[1Aok\r\n"])
+@pytest.mark.parametrize(
+    "line",
+    [
+        b"ok\r\n",
+        b"\x1b[1Aok\r\n",  # without the erase, it isn't known to be a redraw
+        b"\x1b[1A\x1b[Jlog line\r\nstatus\r\n",  # a log line above the block: each one counts
+        b"\x1b[1A\x1b[J",  # nothing drawn: each one erases further
+        b"\x1b[" + b"9" * 5000 + b"A\x1b[Jhuge\r\n",  # any program can print this
+    ],
+)
 def test_repeated_output_that_isnt_a_repaint_is_kept(line):
-    """The same line twice is two lines, and without the erase it isn't known to be a redraw."""
+    """The same line twice is two lines. Only a chunk that ends where it began can go."""
     console = Console()
     console.feed(line)
     console.feed(line)
     assert console.output() == line + line
+
+
+def test_a_repaint_with_a_wrapped_line_still_counts():
+    """It backs up by rows, and a line that wraps is one newline over two rows."""
+    frame = b"\x1b[3A\x1b[Ja line long enough to wrap\r\ntwo\r\n"
+    console = Console()
+    console.feed(frame)
+    console.feed(frame)
+    assert console.output() == frame
+
+
+def test_a_console_can_keep_every_repaint():
+    console = Console(collapse_repaints=False)
+    console.feed(FRAME)
+    console.feed(FRAME)
+    assert console.output() == FRAME + FRAME
 
 
 def test_a_repaint_after_something_else_is_kept():
@@ -92,9 +117,11 @@ def test_a_repaint_after_something_else_is_kept():
 
 def test_a_changing_repaint_reaches_the_console_in_one_piece(rc, monkeypatch):
     """Erased and redrawn in the same chunk, so a page can't draw the block blank."""
-    monkeypatch.setenv("FAKE_RC_REPAINT", "0.15")
+    # A window a stall on a busy machine can't close, and still shorter than the period.
+    monkeypatch.setenv("FAKE_RC_REPAINT", "0.5")
     monkeypatch.setenv("FAKE_RC_REPAINT_CHANGES", "1")
-    monkeypatch.setattr(ptyproc, "BURST_QUIET", 0.05)
+    monkeypatch.setattr(ptyproc, "BURST_QUIET", 0.2)
+    monkeypatch.setattr(ptyproc, "BURST_LIMIT", 1.0)
     viewer = rc.console.subscribe()
     rc.start()
     until(lambda: rc.console.output().count(b"\x1b[J") >= 4)
@@ -110,11 +137,13 @@ def test_an_unchanged_repaint_costs_the_console_nothing(rc, monkeypatch):
     """With a session attached the real CLI repaints every second, and this is what stays quiet."""
     monkeypatch.setenv("FAKE_RC_REPAINT", "0.1")
     monkeypatch.setattr(ptyproc, "BURST_QUIET", 0.04)
+    monkeypatch.setattr(ptyproc, "BURST_LIMIT", 1.0)
     rc.start()
     until(lambda: b"space to show QR code" in rc.console.output())
-    time.sleep(1)
-    # The first drawing has nothing to erase, so it differs from the second.
-    assert rc.console.output().count(b"space to show QR code") <= 3
+    time.sleep(2)
+    # Twice when all goes well: the first drawing has nothing to erase, so it
+    # differs from the second. Room for a stall, far short of the twenty it drew.
+    assert rc.console.output().count(b"space to show QR code") <= 8
 
 
 def test_stop_is_noted_after_the_process_s_last_words(rc, monkeypatch):
@@ -136,6 +165,32 @@ def test_restart_is_noted_after_the_process_s_last_words(rc, monkeypatch):
     until(lambda: b"[opsbox] restarting" in rc.console.output())
     output = rc.console.output()
     assert output.index(b"Environment preserved") < output.index(b"[opsbox] restarting")
+
+
+def test_stop_is_noted_with_a_job_left_holding_the_terminal(rc, monkeypatch):
+    """On Linux the stream doesn't end while the job lives, though the process has gone."""
+    monkeypatch.setenv("FAKE_RC_LEAVE_BEHIND", "20")
+    rc.start()
+    until(lambda: b"Remote Control connected" in rc.console.output())
+    rc.stop()
+    until(lambda: b"[opsbox] stopped" in rc.console.output(), timeout=8)
+
+
+def test_stop_cancels_a_restart_still_under_way(rc, monkeypatch):
+    """Or the next run's first crash would count as that restart, and skip its wait."""
+    monkeypatch.setenv("FAKE_RC_REPAINT", "5")
+    rc.start()
+    until(lambda: b"space to show QR code" in rc.console.output())
+    # What a restart leaves while its process is ending, which is when a Stop can
+    # come: restart() itself doesn't return until the process has gone.
+    rc._restart_now = True
+    rc.stop()
+    until(lambda: b"[opsbox] stopped" in rc.console.output())
+    monkeypatch.delenv("FAKE_RC_REPAINT")
+    monkeypatch.setenv("FAKE_RC_EXIT_AFTER", "0")
+    rc.start()
+    until(lambda: rc.status()["state"] == "backing-off")
+    assert b"[opsbox] restarting" not in rc.console.output()
 
 
 def test_restart_during_a_wait_is_noted_at_once(rc, monkeypatch):

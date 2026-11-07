@@ -45,15 +45,28 @@ def detail_line(rc: dict) -> str:
     return " \u00b7 ".join(parts)
 
 
-# A repaint: back up to where the last one started, erase from there down, draw.
-REPAINT = re.compile(rb"\x1b\[\d+A\x1b\[J")
+# A repaint: back up N rows, erase from there down, draw. A few digits, because
+# int() refuses thousands of them, and any program can print those.
+REPAINT = re.compile(rb"\x1b\[(\d{1,4})A\x1b\[J")
+
+
+def redraws_in_place(data: bytes) -> bool:
+    """Whether *data* is a repaint that ends no lower than it began, so that doing it again changes nothing.
+
+    More newlines than rows means a log line above the block, which would be a
+    line of its own the second time. Fewer is allowed, for lines that wrap. None
+    is an erase with nothing drawn, which erases further each time.
+    """
+    match = REPAINT.match(data)
+    return match is not None and 0 < data.count(b"\n") <= int(match.group(1))
 
 
 class Console:
     """What the page's terminal window shows: Remote Control's output and the manager's notes."""
 
-    def __init__(self, *, keep_bytes: int = 262144) -> None:
+    def __init__(self, *, keep_bytes: int = 262144, collapse_repaints: bool = True) -> None:
         self._buffer: bytearray = bytearray()
+        self._collapse_repaints = collapse_repaints
         self._last_fed = b""
         self._keep_bytes = keep_bytes
         self._lock = threading.Lock()
@@ -77,7 +90,7 @@ class Console:
             # With a session attached, Claude repaints its status block every
             # second. The same repaint with nothing since changes nothing on
             # screen, and would fill the reload history and `docker logs`.
-            if data == self._last_fed and REPAINT.match(data):
+            if self._collapse_repaints and data == self._last_fed and redraws_in_place(data):
                 return
             self._last_fed = data
             self._buffer.extend(data)
@@ -192,6 +205,8 @@ class RemoteControl:
         """
         with self._lock:
             self._want = False
+            # Or a later crash would count as this restart, and skip its wait.
+            self._restart_now = False
             if self._proc is not None and self._proc.running():
                 self._proc.terminate()
             self.state = "stopped"
@@ -330,8 +345,12 @@ class RemoteControl:
                     self.console.note(start_problem)
                 self._problem = start_problem
                 with self._lock:
+                    # Together, so that a Stop can't land between them and go
+                    # unheard for the whole wait.
+                    if not self._want:
+                        break
                     self.state = "backing-off"
-                self._wake.clear()
+                    self._wake.clear()
                 self._wake.wait(timeout=self.backoff_max)
                 continue
             self.console.note("starting Remote Control")
@@ -340,8 +359,12 @@ class RemoteControl:
             window: str = ""
             while True:
                 try:
-                    chunk = sub_q.get()
-                except Exception:
+                    chunk = sub_q.get(timeout=1.0)
+                except queue.Empty:
+                    # On Linux a job left behind keeps the terminal open after the
+                    # process has gone, so the stream alone might not end for hours.
+                    if self._proc.running():
+                        continue
                     break
                 if chunk is None:
                     break
@@ -386,10 +409,12 @@ class RemoteControl:
             self._delay = min(self._delay * 2, self.backoff_max)
 
             with self._lock:
+                # Together, as above.
+                if not self._want:
+                    break
                 self.state = "backing-off"
+                self._wake.clear()
             self.console.note(f"starting again in {delay:g}s")
-
-            self._wake.clear()
             self._wake.wait(timeout=delay)
 
             with self._lock:

@@ -13,6 +13,7 @@ Signing a browser out closes its shell at once.
 from __future__ import annotations
 
 import os
+import queue
 import threading
 import time
 from pathlib import Path
@@ -31,7 +32,9 @@ class Shell:
     """One shell process, and the console that keeps what it printed."""
 
     def __init__(self, argv: list[str], *, env: dict[str, str], cwd: str, cols: int, rows: int) -> None:
-        self.console = Console()
+        # Not collapsed: a shell can run anything, and what looks like a repaint
+        # to Remote Control's console might not be one here.
+        self.console = Console(collapse_repaints=False)
         self._proc = PtyProcess(argv, env=env, cwd=cwd, cols=cols, rows=rows)
         self._viewers = 0
         self._last_viewed = time.monotonic()
@@ -43,7 +46,17 @@ class Shell:
         self._proc.start()
 
         def pump() -> None:
-            while (chunk := output.get()) is not None:
+            while True:
+                try:
+                    chunk = output.get(timeout=1.0)
+                except queue.Empty:
+                    # On Linux a job left behind keeps the terminal open after the
+                    # shell has gone, and the page should still say it has ended.
+                    if self._proc.running():
+                        continue
+                    break
+                if chunk is None:
+                    break
                 self.console.feed(chunk)
             self.console.close()
 

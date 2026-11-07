@@ -24,8 +24,10 @@ MAX_PENDING_INPUT = 65536
 # line. They're kept together until BURST_QUIET seconds pass with nothing more, so
 # a page can't draw the state in between, but for BURST_LIMIT seconds at most, so
 # steady output still arrives as it goes. Both too short for anyone to notice.
+# And not past BURST_BYTES, because a viewer's queue is limited in chunks, not bytes.
 BURST_QUIET = 0.015
 BURST_LIMIT = 0.05
+BURST_BYTES = 16384
 
 # Popen can't give a child its controlling terminal, and preexec_fn isn't safe
 # with threads, so this small shim takes it and then becomes the program. Without
@@ -94,14 +96,14 @@ class PtyProcess:
 
     def _read_burst(self) -> bytes:
         """One read, plus whatever follows it at once (see BURST_QUIET)."""
-        chunk = os.read(self._fd, 65536)
+        chunk = os.read(self._fd, BURST_BYTES)
         deadline = time.monotonic() + BURST_LIMIT
-        while chunk and len(chunk) < 65536:
+        while chunk and len(chunk) < BURST_BYTES:
             wait = min(BURST_QUIET, deadline - time.monotonic())
             if wait <= 0 or not select.select([self._fd], [], [], wait)[0]:
                 break
             try:
-                more = os.read(self._fd, 65536)
+                more = os.read(self._fd, BURST_BYTES)
             except OSError:
                 # The process has gone. The next read says so again, and this
                 # way what it wrote last isn't lost.
