@@ -234,7 +234,7 @@ def test_a_flood_of_output_stays_in_small_chunks() -> None:
         chunks = []
         while sum(map(len, chunks)) < 64 * 65536:
             chunks.append(stream.get(timeout=10))
-        assert max(map(len, chunks)) <= 2 * 65536
+        assert max(map(len, chunks)) < 2 * ptyproc.BURST_BYTES
     finally:
         proc.terminate()
 

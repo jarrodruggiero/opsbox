@@ -85,6 +85,22 @@ def test_after_exit_the_stream_ends_and_opening_starts_a_new_one(shells: Shells)
     assert again is not shell and again.running()
 
 
+def test_a_job_left_behind_doesnt_keep_the_stream_open(shells: Shells) -> None:
+    """On Linux it holds the terminal, and the page should still say the shell has ended."""
+    shell = shells.open("me", 80, 24)
+    shell.write(b'(trap "" HUP; sleep 20) &\rexit\r')
+    until(lambda: shell.console.closed, timeout=8)
+
+
+def test_it_keeps_what_looks_like_a_repaint(shells: Shells) -> None:
+    """A shell can run anything, and a status line with a log above it would lose the log."""
+    shell = shells.open("me", 80, 24)
+    frame = b"\x1b[2A\x1b[Jone\r\ntwo\r\n"
+    shell.console.feed(frame)
+    shell.console.feed(frame)
+    assert shell.console.output().count(frame) == 2
+
+
 def test_closing_ends_a_shell_that_ignores_terminate(shells: Shells) -> None:
     """Signing a browser out must end its shell promptly, and an interactive one ignores SIGTERM."""
     shell = shells.open("me", 80, 24)
