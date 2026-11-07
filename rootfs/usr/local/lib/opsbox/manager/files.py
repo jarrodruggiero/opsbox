@@ -87,6 +87,10 @@ def relative_path(raw: str) -> str:
     parts = text.split("/")
     if any(part in ("", ".", "..") for part in parts):
         raise Refused("A path can't contain empty parts, . or ..")
+    # Counted in bytes, as the filesystem counts: past 255, even asking whether it
+    # exists raises.
+    if any(len(part.encode()) > 255 for part in parts):
+        raise Refused("That path is too long or has characters a file name can't have.")
     relative = "/".join(parts)
     if relative == OFF_LIMITS or relative.startswith(f"{OFF_LIMITS}/"):
         raise Refused("That's where the manager keeps its own files.")
@@ -117,12 +121,19 @@ def _make_parents(path: Path) -> None:
         directory.mkdir(mode=0o700)
 
 
-def save(raw_path: str, data: bytes) -> str:
-    """Save an uploaded file at a checked path, and return that path as the page shows it."""
+def save(raw_path: str, data: bytes, *, from_folder: bool = False) -> str:
+    """Save an uploaded file at a checked path, and return that path as the page shows it.
+
+    An empty file is refused: it's more likely a mistake that would replace a good
+    one. From a folder it's part of what was chosen, so it's kept, but only as a
+    new file or over one that's empty already, so that nothing can be lost to it.
+    """
     if len(data) > MAX_FILE:
         raise Refused(f"That file is over the {MAX_FILE // 1048576} MiB limit.")
     relative = relative_path(raw_path)
     path = home() / relative
+    if not data and (not from_folder or (path.is_file() and path.stat().st_size)):
+        raise Refused("That file is empty.")
     try:
         _make_parents(path)
         _write_private(path, data)

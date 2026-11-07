@@ -337,3 +337,14 @@ def test_the_favicon_and_the_page_draw_the_same_mark() -> None:
     page_paths = re.findall(r"<path[^>]*/>", render.MARK_PATHS)
     assert re.findall(r"<path[^>]*/>", icon) == page_paths
     assert 'class="top"' in render.MARK_PATHS
+
+
+def test_the_upload_form_works_without_its_script() -> None:
+    """The plain control and its path are all a page with no script needs, and the rest stays out of the way."""
+    page = render.page(ctx())
+    form = page.split('id="upload-form"', 1)[1].split("</form>", 1)[0]
+    assert '<input id="file-input" type="file" name="file" required>' in form
+    assert 'autocomplete="off" required>' in form
+    assert 'id="file-pickers" hidden' in form
+    assert 'id="upload-result" role="status" hidden' in form
+    assert "multiple" not in form

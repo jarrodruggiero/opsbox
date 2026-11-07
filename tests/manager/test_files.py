@@ -1,4 +1,4 @@
-"""Tests for uploading config files to a path on the box."""
+"""Tests for uploading files to a path on the box."""
 from __future__ import annotations
 
 import pathlib
@@ -182,3 +182,22 @@ def test_a_poisoned_list_cant_break_the_page_or_widen_remove(home: pathlib.Path)
     with pytest.raises(Refused):
         files.remove("~/../outside")
     assert (home.parent / "outside").read_text() == "outside"
+
+
+def test_an_empty_file_is_refused_unless_from_a_folder(home: pathlib.Path) -> None:
+    """And from a folder only as a new file, or over an empty one, so that nothing is lost to it."""
+    with pytest.raises(Refused, match="empty"):
+        files.save("~/alone", b"")
+    assert files.save("~/f/new", b"", from_folder=True) == "~/f/new"
+    assert files.save("~/f/new", b"", from_folder=True) == "~/f/new"
+    files.save("~/f/good", b"data")
+    with pytest.raises(Refused, match="empty"):
+        files.save("~/f/good", b"", from_folder=True)
+    assert (home / "f/good").read_bytes() == b"data"
+
+
+def test_a_name_too_long_for_the_filesystem_is_refused(home: pathlib.Path) -> None:
+    """Counted in bytes: 100 characters can be 300, and past 255 even asking whether it exists raises."""
+    with pytest.raises(Refused, match="too long"):
+        files.save("~/" + "\u3042" * 100, b"data")
+    assert files.save("~/" + "\u3042" * 85, b"data") == "~/" + "\u3042" * 85

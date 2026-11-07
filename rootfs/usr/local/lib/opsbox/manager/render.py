@@ -211,6 +211,7 @@ def _files(ctx: dict) -> str:
         '<span class="picked" id="file-picked">Nothing chosen</span></div></div>'
         '<div class="field"><label for="file-path" id="path-label">Path on the box</label>'
         '<input id="file-path" name="path" placeholder="~/.kube/config" spellcheck="false" autocapitalize="none" autocomplete="off" required></div>'
+        '<p class="notice" id="upload-result" role="status" hidden></p>'
         '<div class="formactions"><button class="primary">Upload</button></div></form></section>'
     )
 

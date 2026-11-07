@@ -214,12 +214,14 @@ VENDORED = {
 }
 
 
-def in_a_real_browser(ctx: dict, *, drive: str = "") -> tuple[dict, list[tuple[str, str, dict[str, str]]], set[str]]:
+def in_a_real_browser(ctx: dict, *, drive: str = "", after_upload: dict | None = None,
+                      ) -> tuple[dict, list[tuple[str, str, dict[str, str]]], set[str]]:
     """Serve the real page with the real headers and scripts, let interact_probe.js drive it.
 
-    *drive* picks a part of the probe. Returns what the probe saw, every request
-    that reached the server as (method, path, form fields), and the paths
-    manager.js sent as a fetch.
+    *drive* picks a part of the probe, and *after_upload* is the page once
+    something has been uploaded. Returns what the probe saw, every request that
+    reached the server as (method, path, form fields), and the paths manager.js
+    sent as a fetch.
     """
     missing = [name for name, path in VENDORED.items() if not path.is_file()]
     if missing:
@@ -230,9 +232,13 @@ def in_a_real_browser(ctx: dict, *, drive: str = "") -> tuple[dict, list[tuple[s
     for name in ("manager.css", "manager.js", "icon.svg"):
         files[name] = (STATIC / name).read_bytes()
     files["interact_probe.js"] = (Path(__file__).parent / "interact_probe.js").read_bytes()
-    page = render.page(ctx).replace(
-        "</body>", f'<script src="/static/interact_probe.js" data-drive="{drive}"></script></body>'
-    ).encode()
+    def with_probe(context: dict) -> bytes:
+        return render.page(context).replace(
+            "</body>", f'<script src="/static/interact_probe.js" data-drive="{drive}"></script></body>'
+        ).encode()
+
+    page = with_probe(ctx)
+    page_after_upload = with_probe(after_upload) if after_upload else page
     # With a terminal query in it, as old output can have: xterm answers those as
     # if typed, and replaying this after a reload must not type anything.
     greeting = base64.b64encode(b"\x1b[32mhello from the console\x1b[0m\x1b[c\x1b[6n\r\n").decode()
@@ -261,7 +267,8 @@ def in_a_real_browser(ctx: dict, *, drive: str = "") -> tuple[dict, list[tuple[s
             seen.append(("GET", self.path, {}))
             name = self.path.removeprefix("/static/")
             if self.path == "/":
-                self.reply(200, page, "text/html; charset=utf-8")
+                uploaded = any(entry[:2] == ("POST", "/files") for entry in seen)
+                self.reply(200, page_after_upload if uploaded else page, "text/html; charset=utf-8")
             elif self.path.startswith("/static/") and name in files:
                 kinds = {".css": "text/css", ".svg": "image/svg+xml"}
                 self.reply(200, files[name], kinds.get(Path(name).suffix, "text/javascript"))
@@ -290,8 +297,15 @@ def in_a_real_browser(ctx: dict, *, drive: str = "") -> tuple[dict, list[tuple[s
             seen.append(("POST", self.path, fields))
             if self.headers.get("X-Opsbox-Fetch") == "1":
                 fetched.add(self.path)
+            refusal = None
             if "refused" in fields.get("path", ""):
-                self.reply(400, json.dumps({"error": "That's where the manager keeps its own files."}).encode(), "application/json")
+                refusal = "That's where the manager keeps its own files."
+            elif fields.get("path") == "":
+                refusal = "Say where the file goes, such as ~/.kube/config."
+            elif fields.get("file") == "refuse-me":
+                refusal = "That file is empty."
+            if refusal:
+                self.reply(400, json.dumps({"error": refusal}).encode(), "application/json")
             elif "signedout" in fields.get("path", ""):
                 self.reply(403, b"Sign in first, then try again.", "text/plain")
             elif "dropped" in fields.get("path", ""):
@@ -393,11 +407,17 @@ def upload_page() -> dict:
     )
 
 
+def sent_to(sent: list[dict[str, str]], path: str) -> list[dict[str, str]]:
+    """What was sent for one path."""
+    return [fields for fields in sent if fields["path"] == path]
+
+
 def test_uploading_in_a_real_browser() -> None:
     """Several files, a whole folder, refusals, and Replace: each file its own request."""
     report, seen, fetched = in_a_real_browser(upload_page(), drive="uploads")
     assert report["violations"] == []
     sent = uploads(seen)
+    paths = [fields["path"] for fields in sent]
     assert "/files" in fetched
     assert all(fields["csrf"] == "c" * 64 for fields in sent)
 
@@ -405,24 +425,27 @@ def test_uploading_in_a_real_browser() -> None:
     assert report["heading"] == "Upload files"
     assert report["nativeHidden"] is True
     assert report["buttons"] == ["Choose files", "Choose folder"]
+    assert report["pickersShown"] is True
     assert report["nothing"] == "Nothing chosen"
     assert report["fileLabel"] == "Files"
     assert report["buttonsLineUp"] is True
     assert report["listScrolls"] == "auto"
+    assert report["resultHidden"] is True
     assert report["emptyOpensDialog"] is True
     assert report["folderPickerClicked"] is True
     assert report["filesPickerClicked"] is True
-    assert report["pickersShown"] is True
 
-    # One file: the path names the file itself, and it can be typed over.
+    # One file: the path names the file itself, and the result shows by the form.
     assert report["onePicked"] == "a.txt"
     assert report["onePath"] == "~/a.txt"
     assert report["oneLabel"] == "Path on the box"
-    assert report["oneNotice"] == "Uploaded."
-    assert {"path": "~/renamed.txt", "file": "one"}.items() <= sent[0].items()
-    assert "folder" not in sent[0]
+    assert report["oneResult"] == "Uploaded."
+    assert report["resultInView"] is True
+    one = sent_to(sent, "~/renamed.txt")
+    assert one and one[0]["file"] == "one" and "folder" not in one[0]
 
-    # The path follows what's chosen until it's typed over.
+    # A new choice clears the last result, and the path follows it until it's typed over.
+    assert report["resultAfterChoice"] == ""
     assert report["followsChoice"] == "~/"
     assert report["keepsTyped"] == "~/mine/"
 
@@ -430,55 +453,103 @@ def test_uploading_in_a_real_browser() -> None:
     assert report["manyPicked"] == "2 files"
     assert report["manyPath"] == "~/"
     assert report["manyLabel"] == "Folder on the box"
-    assert [fields["path"] for fields in sent[1:3]] == ["~/.kube/b.txt", "~/.kube/c.txt"]
-    assert "folder" not in sent[1]
-    assert report["manyNotice"] == "Uploaded 2 files."
+    assert sent_to(sent, "~/.kube/b.txt") and sent_to(sent, "~/.kube/c.txt")
+    assert "folder" not in sent_to(sent, "~/.kube/b.txt")[0]
+    assert report["manyResult"] == "Uploaded 2 files."
     assert report["progress"][:2] == ["Uploading 1 of 2\u2026", "Uploading 2 of 2\u2026"]
+    # While it ran, nothing could change what was being sent, and leaving warned.
+    assert report["busyPickers"] is True
+    assert report["busyPath"] is True
+    assert report["leavingWarned"] is True
     assert report["replacedMidUpload"] is False
-    # What's on the page came back without a reload, and nothing stayed chosen.
+    # Then the list came back without a reload, and nothing stayed chosen.
     assert report["listRefreshed"] is True
     assert report["consoleKept"] is True
     assert report["manyPathAfter"] == ""
     assert report["manyPickedAfter"] == "Nothing chosen"
     assert report["uploadLabelAfter"] == "Upload"
+    assert report["idleAgain"] is True
+    assert report["leavingAfter"] is False
 
     # A folder keeps its own name and its structure, and its empty files.
     assert report["folderPicked"] == "box: 2 files"
-    assert [fields["path"] for fields in sent[3:5]] == ["~/backup/box/one.txt", "~/backup/box/sub/empty"]
-    assert sent[3]["folder"] == sent[4]["folder"] == "1"
-    assert sent[4]["file"] == ""
+    assert sent_to(sent, "~/backup/box/one.txt")[0]["folder"] == "1"
+    empty = sent_to(sent, "~/backup/box/sub/empty")[0]
+    assert empty["folder"] == "1" and empty["file"] == ""
 
-    # Refusals: the rest still go, and the reasons say which file.
-    assert [fields["path"] for fields in sent[5:7]] == ["~/refused/x", "~/fine"]
-    assert report["refusedNotice"] == "Uploaded 1 of 2. ~/refused/x: That's where the manager keeps its own files."
+    # Refusals: the rest still go, the reasons say which file, and what was saved is listed.
+    assert sent_to(sent, "~/refused/x") and sent_to(sent, "~/fine")
+    assert report["refusedResult"] == "Uploaded 1 of 2. ~/refused/x: That's where the manager keeps its own files."
     assert report["refusedBad"] is True
+    assert report["partialPicked"] == "Nothing chosen"
+    assert report["partialPath"] == ""
+    assert report["partialRedrawn"] is True
 
-    # Over the limit it's never sent, and said in the server's words.
-    assert not [fields for fields in sent if fields["path"].endswith("huge")]
-    assert report["hugeNotice"] == "~/huge: That file is over the 1 MiB limit."
-    # Refused outright, the choice stays, so that the path can be corrected.
+    assert report["confirmOpen"] is True
+    assert report["keptUnderConfirm"] is True
+
+    # Over the limit it's never sent, and said as files.py says it; at the limit it goes.
+    assert not sent_to(sent, "~/huge")
+    assert report["hugeResult"] == "~/huge: That file is over the 1 MiB limit."
     assert report["hugeKept"] == "huge"
+    assert sent_to(sent, "~/exact")
 
-    # Refused many times: three reasons, then how many more.
     reason = "That's where the manager keeps its own files."
-    assert report["manyRefusedNotice"] == " ".join(f"~/refused/{n}: {reason}" for n in (1, 2, 3)) + " And 2 more."
-    # A dropped connection isn't a mystery.
+    assert report["manyRefusedResult"] == " ".join(f"~/refused/{n}: {reason}" for n in (1, 2, 3)) + " And 2 more."
     assert report["oneInFolder"] == "dropped: 1 file"
-    assert report["droppedNotice"] == "~/dropped/x: Couldn't be sent."
+    assert report["droppedResult"] == "~/dropped/x: Couldn't be sent."
 
-    # Too many at once is refused before anything starts.
-    assert report["tooManyNotice"] == "That's 1001 files, and the page takes 1000 at a time."
+    # Too many is refused before anything starts, and what was chosen before stays.
+    assert report["tooManyResult"] == "That's 1001 files, and the page takes 1000 at a time."
+    assert report["tooManyKeptPicked"] == "keep.txt"
+    assert report["tooManyKeptPath"] == "~/kept.txt"
+
+    # Nowhere to go: several files aren't sent, and one file's refusal has no stray colon.
+    assert report["blankResult"] == "Say where they go, such as ~/.kube/."
+    assert not [path for path in paths if "blank-" in path]
+    assert report["blankOneResult"] == "Say where the file goes, such as ~/.kube/config."
 
     # Signed out partway: stops, rather than failing the same way a hundred times.
-    assert "~/signedout/1" in [fields["path"] for fields in sent]
-    assert "~/signedout/2" not in [fields["path"] for fields in sent]
-    assert report["signedOutNotice"] == "~/signedout/1: Sign in first, then try again."
+    assert sent_to(sent, "~/signedout/1") and not sent_to(sent, "~/signedout/2")
+    assert report["signedOutResult"] == "~/signedout/1: Sign in first, then try again."
 
-    # Replace: picks one file, to that row's path, with no further step.
+    # Replace: one file, to that row's path, with no further step, and what was chosen stays.
     assert report["replaceMultiple"] is False
-    assert sent[-1]["path"] == "~/.kube/config"
-    assert sent[-1]["file"] == "new"
     assert report["multipleAfterReplace"] is True
+    assert [fields for fields in sent_to(sent, "~/.kube/config") if fields["file"] == "new"]
+    assert report["pendingPicked"] == "2 files"
+    assert report["pendingPath"] == "~/dest/"
+    assert sent_to(sent, "~/dest/d1") and sent_to(sent, "~/dest/d2")
+
+    # A refused Replace leaves nothing for the next Upload to send.
+    assert report["refusedReplaceResult"] == "~/.kube/config: That file is empty."
+    assert report["refusedReplacePath"] == ""
+    assert report["refusedReplacePicked"] == "Nothing chosen"
+    assert report["refusedReplaceOpensDialog"] is True
+    assert len([fields for fields in sent if fields["file"] == "refuse-me"]) == 1
+
+    # Replace, then cancel: nothing lost, and the next choice is an ordinary one.
+    assert report["cancelMultiple"] is True
+    assert report["cancelPath"] == "~/cancelled/"
+    assert report["cancelPicked"] == "2 files"
+    assert report["afterCancelPicked"] == "after-cancel"
+    assert report["noCancelPicked"] == "no-cancel"
+    assert not [fields for fields in sent if fields["file"] in ("f", "g")]
+
+    # A browser with no folder picker, and a folder with no files.
+    assert report["plainFromFolder"] == "plain.txt"
+    assert report["plainFromFolderLabel"] == "Path on the box"
+    assert report["emptyFolderResult"] == "That folder has no files."
+
+
+def test_a_first_upload_shows_its_row() -> None:
+    """From an empty list, the page's list is redrawn from what the server says now."""
+    after = context(files=[{"path": "~/.kube/config", "size": 1, "uploaded": 1762400000}])
+    report, _seen, _fetched = in_a_real_browser(context(files=[]), drive="first-upload", after_upload=after)
+    assert report["violations"] == []
+    assert report["emptyBefore"] is True
+    assert report["emptyAfter"] is False
+    assert report["firstRow"] == "~/.kube/config"
 
 
 def test_pasting_the_code_finishes_signing_in() -> None:
