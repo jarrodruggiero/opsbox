@@ -216,6 +216,17 @@ def test_stop_with_nothing_running_is_noted_once(fake_claude, tmp_path):
     assert rc.console.output().count(b"[opsbox] stopped") == 1
 
 
+def test_the_skills_library_is_brought_up_to_date_before_each_start(rc, tmp_path, monkeypatch):
+    """And what happened is said in the console, ahead of Remote Control's own output."""
+    monkeypatch.setenv("HOME", str(tmp_path / "box-home"))
+    (tmp_path / "box-home").mkdir()
+    rc.env_file.write_text(f"OPSBOX_SKILLS_REPO={tmp_path / 'missing.git'}\n")
+    rc.start()
+    until(lambda: b"Remote Control connected" in rc.console.output())
+    output = rc.console.output()
+    assert output.index(b"[opsbox] skills: couldn't") < output.index(b"[opsbox] starting Remote Control")
+
+
 def test_waits_while_signed_out(fake_claude, tmp_path):
     """Waits while signed out, then runs after signing in."""
     console = Console()

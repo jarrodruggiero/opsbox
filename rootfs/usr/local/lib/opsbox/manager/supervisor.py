@@ -8,7 +8,7 @@ import time
 
 from pathlib import Path
 
-from . import claude
+from . import claude, skills
 from .keys import read_env_file
 from .ptyproc import PtyProcess
 
@@ -315,6 +315,10 @@ class RemoteControl:
             # while the sign-in was being checked, so look again under the lock.
             env = {"TERM": "xterm-256color", "COLORTERM": "truecolor", **os.environ}
             env.update(read_env_file(self.env_file))
+            # Each start, so a Restart picks up a changed skill (see skills.py).
+            note = skills.sync(env, Path(env.get("HOME") or Path.home()))
+            if note:
+                self.console.note(note)
             with self._lock:
                 if not self._want:
                     break

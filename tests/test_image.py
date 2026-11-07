@@ -87,6 +87,18 @@ def test_runs_as_opsbox() -> None:
     assert result.stdout == "opsbox\n"
 
 
+def test_github_s_host_keys_are_known() -> None:
+    """Git over SSH to GitHub never stops to ask, as nobody is there to answer."""
+    result = run("ssh-keygen", "-F", "github.com", "-f", "/etc/ssh/ssh_known_hosts")
+    keys = [line for line in result.stdout.splitlines() if line.startswith("github.com ")]
+    assert len(keys) == 3
+
+
+def test_a_python_venv_can_be_made() -> None:
+    """Debian's Python needs python3-venv for it, and local-llm's installer makes one."""
+    run("python3", "-m", "venv", "/tmp/venv-check")
+
+
 def test_no_sudo() -> None:
     """The image has no sudo binary."""
     result = run("sh", "-c", "command -v sudo", check=False)

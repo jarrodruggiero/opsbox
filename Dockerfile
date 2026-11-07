@@ -71,6 +71,7 @@ RUN set -eu; \
         postgresql-client \
         procps \
         python3 \
+        python3-venv \
         python3-yaml \
         rsync \
         sqlite3 \
@@ -153,6 +154,7 @@ COPY --chown=0:0 --from=mise /usr/local/bin/mise /usr/local/bin/mise
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 COPY --chown=0:0 --chmod=0755 rootfs/usr/local/bin/ /usr/local/bin/
+COPY --chown=0:0 --chmod=0644 rootfs/etc/ssh/ssh_known_hosts /etc/ssh/ssh_known_hosts
 # The manager writes only under $HOME, so the read-only root still holds.
 COPY --chown=0:0 rootfs/usr/local/lib/opsbox/ /usr/local/lib/opsbox/
 COPY --chown=0:0 --from=ui /ui/node_modules/@xterm/xterm/lib/xterm.js /usr/local/lib/opsbox/manager/static/xterm.js

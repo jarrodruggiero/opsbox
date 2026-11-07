@@ -110,6 +110,15 @@ Claude Code keeps its own sign-in and settings in `~/.claude` and
 `~/.claude.json`. Clone repositories into `~/workspace` (see the trust note
 above).
 
+**Skills from a git repository:** set `OPSBOX_SKILLS_REPO` to its URL, such as
+`git@github.com:you/claude-skills.git`, and each start of Remote Control brings
+`~/.claude/skills` up to date from it, so Restart picks up a changed skill. It
+uses the box's own credentials. For SSH that's the key from the manager page,
+added to the repository as a deploy key; GitHub's host keys are already in the
+image. It only ever fast-forwards: changes on the box, another branch, or
+commits the repository doesn't have are left alone, and the console says so.
+claude.ai's own `synced/` folder stays where it is.
+
 The volume must be owned by uid 1000: `mkdir -m 0700 home && sudo chown
 1000:1000 home`. On every start the entrypoint takes away other users' access
 to it too, whatever mode it was created with. Back it up, and protect it like
