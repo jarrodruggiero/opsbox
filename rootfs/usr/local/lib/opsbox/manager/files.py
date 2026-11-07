@@ -1,4 +1,4 @@
-"""Config files a person uploads to a path on the box: a kubeconfig, a talosconfig.
+"""Files a person uploads to a path on the box: a kubeconfig, a talosconfig, a folder of either.
 
 The page never shows a file's contents, only its path, size and date. Everything
 it writes is private (0600 in 0700 directories) and written atomically.

@@ -92,11 +92,12 @@ firewall rules can name it. Never map the Docker socket.
 Everything personal lives in the volume at `/home/opsbox`, and none of it is
 in the image. The manager page puts things there three ways:
 
-- **Config files:** choose a file and say where it goes, under `~`. A kubeconfig
-  goes to `~/.kube/config`, a talosconfig to `~/.talos/config`, gh's to
-  `~/.config/gh/hosts.yml`, Terraform's to
-  `~/.terraform.d/credentials.tfrc.json`. Files are private to the box's user,
-  up to 1 MiB, and the page shows only their path, size and date.
+- **Upload files:** choose files or a whole folder and say where they go, under
+  `~`. A kubeconfig goes to `~/.kube/config`, a talosconfig to `~/.talos/config`,
+  gh's to `~/.config/gh/hosts.yml`, Terraform's to
+  `~/.terraform.d/credentials.tfrc.json`. A folder keeps its name and structure.
+  Files are private to the box's user (a script loses its execute bit), up to
+  1 MiB each, and the page shows only their path, size and date.
 - **Environment:** any name and value, applied the next time Remote Control or a
   shell starts. Hide a value and it's never sent to a browser again (names that
   look secret, like `GH_TOKEN`, hide themselves, and a hidden one stays hidden

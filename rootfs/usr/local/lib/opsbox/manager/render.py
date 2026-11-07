@@ -19,6 +19,7 @@ from __future__ import annotations
 import html
 import time
 
+from .files import MAX_FILE
 from .supervisor import STATE_LABELS, detail_line
 
 # The mark: an isometric cube on the suite's 24 grid, stroked at 2 with round
@@ -187,7 +188,11 @@ def _console(ctx: dict) -> str:
 
 
 def _files(ctx: dict) -> str:
-    """The config files uploaded to the box, and the form to upload another."""
+    """The files uploaded to the box, and the form to upload more.
+
+    The file control and the path are all a page with no script needs. The two
+    buttons are manager.js's: a browser's dialog picks files or a folder, never both.
+    """
     rows = "".join(
         f'<li class="row"><div class="rowmain"><div class="rowname">{e(f["path"])}</div>'
         f'<div class="rowmeta">{e(size_text(f["size"]))} · {e(date_text(f["uploaded"]))}</div></div>'
@@ -198,10 +203,13 @@ def _files(ctx: dict) -> str:
     )
     listing = f'<ul class="rows">{rows}</ul>' if rows else '<p class="empty">No files yet.</p>'
     return (
-        '<section class="panel" id="files"><div class="panelhead"><h2>Config files</h2></div>'
-        f'{listing}<form class="stacked" id="upload-form" method="post" action="/files" enctype="multipart/form-data">{_field(ctx["csrf"])}'
-        '<div class="field"><label for="file-input">File</label><input id="file-input" type="file" name="file" required></div>'
-        '<div class="field"><label for="file-path">Path on the box</label>'
+        '<section class="panel" id="files"><div class="panelhead"><h2>Upload files</h2></div>'
+        f'{listing}<form class="stacked" id="upload-form" method="post" action="/files" enctype="multipart/form-data" data-max-file="{MAX_FILE}">{_field(ctx["csrf"])}'
+        '<div class="field"><label for="file-input">File</label><input id="file-input" type="file" name="file" required>'
+        '<div class="pickers" id="file-pickers" hidden><button type="button" class="secondary" id="choose-files">Choose files</button>'
+        '<button type="button" class="secondary" id="choose-folder">Choose folder</button>'
+        '<span class="picked" id="file-picked">Nothing chosen</span></div></div>'
+        '<div class="field"><label for="file-path" id="path-label">Path on the box</label>'
         '<input id="file-path" name="path" placeholder="~/.kube/config" spellcheck="false" autocapitalize="none" autocomplete="off" required></div>'
         '<div class="formactions"><button class="primary">Upload</button></div></form></section>'
     )

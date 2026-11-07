@@ -78,7 +78,7 @@ def test_a_stranger_sees_only_the_sign_in() -> None:
     # And render itself hides them, even if handed a context that holds them.
     leaky = render.page(ctx(session=False, csrf=""))
     for shown in (page, leaky):
-        for secret in ("me@example.com", "Acme", "Config files", "Environment", "pane-rc", "data-state", "~/.kube/config", "ssh-ed25519", "csrf-token"):
+        for secret in ("me@example.com", "Acme", "Upload files", "Environment", "pane-rc", "data-state", "~/.kube/config", "ssh-ed25519", "csrf-token"):
             assert secret not in shown, secret
 
 

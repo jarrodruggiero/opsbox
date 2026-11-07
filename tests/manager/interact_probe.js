@@ -96,6 +96,172 @@
     ];
   }
 
+  // A file dialog can't be driven, so what it would hand back is set directly.
+  function pick(input, files) {
+    Object.defineProperty(input, "files", { value: files, configurable: true, writable: true });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function inFolder(name, text, relative) {
+    var file = new File([text], name);
+    Object.defineProperty(file, "webkitRelativePath", { value: relative });
+    return file;
+  }
+
+  function idle() {
+    var button = document.querySelector("#upload-form button.primary");
+    return !button.disabled;
+  }
+
+  function uploadPage() {
+    var fileInput = byId("file-input");
+    var folderInput = document.querySelector("#upload-form input[webkitdirectory]");
+    var noticeText = function () { return byId("notice").textContent; };
+    var submit = function () { document.querySelector("#upload-form button.primary").click(); };
+    return [
+      { run: function () {
+        report.heading = document.querySelector("#files h2").textContent;
+        report.nativeHidden = fileInput.hidden;
+        report.buttons = Array.prototype.map.call(byId("file-pickers").querySelectorAll("button"), function (b) { return b.textContent; });
+        report.nothing = byId("file-picked").textContent;
+        report.fileLabel = document.querySelector('label[for="choose-files"]').textContent;
+        var tops = Array.prototype.map.call(byId("file-pickers").querySelectorAll("button"), function (b) { return b.getBoundingClientRect().top; });
+        report.buttonsLineUp = tops[0] === tops[1];
+        report.listScrolls = getComputedStyle(document.querySelector("#files .rows")).overflowY;
+        report.pickersShown = !byId("file-pickers").hidden;
+        // Upload with nothing chosen opens the dialog, rather than sending nothing.
+        var opened = function (input, act) {
+          var clicked = false;
+          var watch = function () { clicked = true; };
+          input.addEventListener("click", watch);
+          act();
+          input.removeEventListener("click", watch);
+          return clicked;
+        };
+        report.emptyOpensDialog = opened(fileInput, submit);
+        report.folderPickerClicked = opened(folderInput, function () { byId("choose-folder").click(); });
+        report.filesPickerClicked = opened(fileInput, function () { byId("choose-files").click(); });
+      } },
+      // One file.
+      { run: function () {
+        pick(fileInput, [new File(["one"], "a.txt")]);
+        report.onePicked = byId("file-picked").textContent;
+        report.onePath = byId("file-path").value;
+        report.oneLabel = byId("path-label").textContent;
+        byId("file-path").value = "~/renamed.txt";
+        submit();
+      } },
+      { when: idle, run: function () { report.oneNotice = noticeText(); } },
+      // The path follows what's chosen, until it's typed over.
+      { run: function () {
+        pick(fileInput, [new File(["a"], "a.txt")]);
+        pick(fileInput, [new File(["a"], "a.txt"), new File(["b"], "b.txt")]);
+        report.followsChoice = byId("file-path").value;
+        byId("file-path").value = "~/mine/";
+        pick(fileInput, [new File(["a"], "a.txt")]);
+        report.keepsTyped = byId("file-path").value;
+      } },
+      // Two files, and a folder given without its slash.
+      { run: function () {
+        document.querySelector("#files .rows").dataset.stale = "1";
+        report.consoleEl = document.querySelector("#pane-rc .xterm-rows");
+        byId("file-path").value = "";
+        pick(fileInput, [new File(["b"], "b.txt"), new File(["c"], "c.txt")]);
+        report.manyPicked = byId("file-picked").textContent;
+        report.manyPath = byId("file-path").value;
+        report.manyLabel = byId("path-label").textContent;
+        byId("file-path").value = "~/.kube";
+        report.progress = [];
+        var button = document.querySelector("#upload-form button.primary");
+        new MutationObserver(function () { report.progress.push(button.textContent); }).observe(button, { childList: true });
+        submit();
+        // Replace waits while an upload runs: it would change what's being sent.
+        var replaced = false;
+        var watch = function () { replaced = true; };
+        fileInput.addEventListener("click", watch);
+        document.querySelector("[data-replace]").click();
+        fileInput.removeEventListener("click", watch);
+        report.replacedMidUpload = replaced;
+      } },
+      { when: function () { return idle() && noticeText().indexOf("2 files") >= 0; }, pause: 500, run: function () {
+        report.manyNotice = noticeText();
+        report.manyPathAfter = byId("file-path").value;
+        report.manyPickedAfter = byId("file-picked").textContent;
+        report.uploadLabelAfter = document.querySelector("#upload-form button.primary").textContent;
+        report.consoleKept = report.consoleEl === document.querySelector("#pane-rc .xterm-rows");
+        delete report.consoleEl;
+      } },
+      { when: function () { return !document.querySelector("#files .rows").dataset.stale; }, run: function () {
+        report.listRefreshed = !document.querySelector("#files .rows").dataset.stale;
+      } },
+      // A whole folder, with an empty file in it.
+      { run: function () {
+        pick(folderInput, [inFolder("one.txt", "1", "box/one.txt"), inFolder("empty", "", "box/sub/empty")]);
+        report.folderPicked = byId("file-picked").textContent;
+        byId("file-path").value = "~/backup/";
+        submit();
+      } },
+      { when: idle },
+      // One refused, one fine.
+      { run: function () {
+        pick(folderInput, [inFolder("x", "x", "refused/x"), inFolder("fine", "y", "fine")]);
+        byId("file-path").value = "~/";
+        submit();
+      } },
+      { when: idle, run: function () {
+        report.refusedNotice = noticeText();
+        report.refusedBad = byId("notice").classList.contains("bad");
+      } },
+      // Too big, and never sent.
+      { run: function () {
+        pick(fileInput, [new File([new Uint8Array(1048577)], "huge")]);
+        byId("file-path").value = "~/huge";
+        submit();
+      } },
+      { when: idle, run: function () {
+        report.hugeNotice = noticeText();
+        report.hugeKept = byId("file-picked").textContent;
+      } },
+      // Refused many times over: three reasons, and how many more.
+      { run: function () {
+        pick(folderInput, [1, 2, 3, 4, 5].map(function (n) { return inFolder(String(n), "x", "refused/" + n); }));
+        byId("file-path").value = "~/";
+        submit();
+      } },
+      { when: idle, run: function () { report.manyRefusedNotice = noticeText(); } },
+      // The connection drops.
+      { run: function () {
+        pick(folderInput, [inFolder("x", "x", "dropped/x")]);
+        byId("file-path").value = "~/";
+        report.oneInFolder = byId("file-picked").textContent;
+        submit();
+      } },
+      { when: idle, run: function () { report.droppedNotice = noticeText(); } },
+      // Too many.
+      { run: function () {
+        var lots = [];
+        for (var i = 0; i < 1001; i++) { lots.push(new File([""], "f" + i)); }
+        pick(fileInput, lots);
+        report.tooManyNotice = noticeText();
+      } },
+      // Signed out partway.
+      { run: function () {
+        pick(folderInput, [inFolder("1", "1", "signedout/1"), inFolder("2", "2", "signedout/2")]);
+        byId("file-path").value = "~/";
+        submit();
+      } },
+      { when: idle, run: function () { report.signedOutNotice = noticeText(); } },
+      // Replace.
+      { run: function () {
+        fileInput.addEventListener("click", function () { report.replaceMultiple = fileInput.multiple; }, { once: true });
+        document.querySelector("[data-replace]").click();
+        pick(fileInput, [new File(["new"], "whatever")]);
+        report.multipleAfterReplace = fileInput.multiple;
+      }, pause: 500 },
+      { when: idle }
+    ];
+  }
+
   function signingInPage() {
     return [
       { run: function () {
@@ -114,7 +280,8 @@
 
   window.addEventListener("load", function () {
     setTimeout(function () {
-      steps(document.querySelector("#code") ? signingInPage() : signedInPage());
+      var drive = document.querySelector("script[data-drive]").dataset.drive;
+      steps(drive === "uploads" ? uploadPage() : document.querySelector("#code") ? signingInPage() : signedInPage());
     }, 200);
   });
 })();
