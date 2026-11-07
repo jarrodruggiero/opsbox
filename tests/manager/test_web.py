@@ -283,16 +283,25 @@ def test_upload_refusals_say_why_on_the_page(box) -> None:
     assert box.manager.owner() == ("me@example.com", "org-1"), "an upload reached the owner file"
 
 
-def test_an_empty_file_is_refused_alone_and_kept_from_a_folder(box) -> None:
-    """Alone it's more likely a mistake that would replace a good file. In a folder it's part of it."""
+def test_an_empty_file_from_a_folder_is_kept_but_never_empties_one(box) -> None:
+    """Otherwise an empty file is more likely a mistake that would replace a good one."""
     browser = Browser(box.port)
     assert sign_in(browser).status == 303
-    refused = browser.upload("~/.kube/config", b"", fields={"folder": ""})
+    refused = browser.upload("~/new-empty", b"")
     assert refused.status == 400
     assert "empty" in context_of(refused)["error"]
-    assert not (box.home / ".kube/config").exists()
+    # From a folder, a new one is part of it.
     assert browser.upload("~/copy/sub/__init__.py", b"", fields={"folder": "1"}).status == 303
     assert (box.home / "copy/sub/__init__.py").read_bytes() == b""
+    # But it never empties a good file.
+    assert browser.upload("~/.kube/config", b"good").status == 303
+    assert browser.upload("~/.kube/config", b"", fields={"folder": "1"}).status == 400
+    assert (box.home / ".kube/config").read_bytes() == b"good"
+    # Only "1" is a folder, and the flag with no file at all is no upload.
+    for value in ("", "0", "false"):
+        assert browser.upload("~/zero", b"", fields={"folder": value}).status == 400
+    assert browser.upload("~/nothing", None, fields={"folder": "1"}).status == 400
+    assert not (box.home / "zero").exists() and not (box.home / "nothing").exists()
 
 
 def test_an_upload_from_the_page_s_script_gets_its_answer_as_data(box) -> None:

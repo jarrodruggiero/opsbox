@@ -104,18 +104,19 @@ class Browser:
         assert resp.status == 200, resp.body
         return context_of(resp)
 
-    def upload(self, path: str, data: bytes, csrf: str | None = None, *, fields: dict | None = None,
+    def upload(self, path: str, data: bytes | None, csrf: str | None = None, *, fields: dict | None = None,
                headers: dict | None = None) -> SimpleNamespace:
-        """Send the page's upload form, as a browser's multipart body."""
+        """Send the page's upload form, as a browser's multipart body; no file part for None."""
         boundary = "----browserboundary7f3a"
         token = self.csrf() if csrf is None else csrf
         parts = []
         for name, value in (("csrf", token), ("path", path), *(fields or {}).items()):
             parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
-        parts.append(
-            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="x"\r\n'
-            "Content-Type: application/octet-stream\r\n\r\n".encode() + data + b"\r\n"
-        )
+        if data is not None:
+            parts.append(
+                f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="x"\r\n'
+                "Content-Type: application/octet-stream\r\n\r\n".encode() + data + b"\r\n"
+            )
         parts.append(f"--{boundary}--\r\n".encode())
         return self.request("POST", "/files", body=b"".join(parts), headers={"Content-Type": f"multipart/form-data; boundary={boundary}", **(headers or {})})
 

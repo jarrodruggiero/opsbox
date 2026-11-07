@@ -72,7 +72,7 @@ MAX_BODY = 131072
 # refuses those), so an oversize file gets its reason rather than a reset connection.
 MAX_UPLOAD = 16 * files.MAX_FILE
 MAX_INPUT = 4096
-# A multipart body's parts (csrf, path, file and room to spare), and the most any
+# A multipart body's parts (csrf, path, folder, file and room to spare), and the most any
 # one's headers need: parsing costs time before the csrf can even be checked.
 MAX_PARTS = 8
 MAX_PART_HEADERS = 4096
@@ -845,13 +845,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not self.manager.sessions.check_csrf(session, csrf):
             self._text(403, b"Sign in first, then try again.")
             return
-        data = fields.get("file", b"")
+        # With its file, or a request with nothing in it could empty one.
+        from_folder = fields.get("folder") == b"1" and "file" in fields
         try:
-            # Alone, an empty file is more likely a mistake that would replace a
-            # good one. From a folder, it's part of the folder.
-            if not data and not fields.get("folder"):
-                raise keys.Refused("That file is empty.")
-            files.save(fields.get("path", b"").decode("utf-8", errors="replace"), data)
+            files.save(
+                fields.get("path", b"").decode("utf-8", errors="replace"),
+                fields.get("file", b""),
+                from_folder=from_folder,
+            )
         except keys.Refused as refused:
             self._refuse(400, str(refused))
             return
