@@ -187,11 +187,11 @@
       fontSize: 13,
       scrollback: 5000,
       theme: {
-        background: "#0b0e14",
-        foreground: "#e7eaf4",
-        cursor: "#8b83f0",
-        cursorAccent: "#0b0e14",
-        selectionBackground: "rgba(139, 131, 240, 0.35)"
+        background: "#0b0f11",
+        foreground: "#e6ebec",
+        cursor: "#2dd4bf",
+        cursorAccent: "#0b0f11",
+        selectionBackground: "rgba(45, 212, 191, 0.3)"
       }
     });
     var fit = window.FitAddon ? new window.FitAddon.FitAddon() : null;
