@@ -25,11 +25,11 @@ FROM ghcr.io/terraform-linters/tflint:v0.65.0@sha256:2788f4d4fc663c0e953b011b01b
 FROM quay.io/terraform-docs/terraform-docs:0.20.0@sha256:37329e2dc2518e7f719a986a3954b10771c3fe000f50f83fd4d98d489df2eae2 AS terraform-docs
 FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 AS uv
 FROM docker.io/library/node:26.13.0-trixie-slim@sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39 AS node
-FROM docker.io/library/docker:29.9.2-cli@sha256:5e6baf67325a79f64ed3bed6863954d5e05d0f3d4e57cbdb14809346814bbfdb AS docker
+FROM docker.io/library/docker:29.9.3-cli@sha256:2357639ad1ea7d0194134bf3292622fd4e562483966ed674e5d7c945b5f3b28d AS docker
 FROM quay.io/cilium/cilium-cli:v0.20.2@sha256:40597ffa6477095c547d24b617d33b5a5e33395e1872c26d9ce8d09feef67d64 AS cilium
 FROM ghcr.io/restic/restic:0.19.1@sha256:2f0373803493361f9304a57150d464677f69a9dad487afec202105aafb2592f2 AS restic
 FROM docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d AS shellcheck
-FROM ghcr.io/jdx/mise:2026.11.3@sha256:60a4852b1632aebb032c94bfbaf8196a1088c091bfd6cfa1ce8f182ab39c7d8e AS mise
+FROM ghcr.io/jdx/mise:2026.11.5@sha256:3beda11ba592da44277cac15061103b844c69420a55cb5c41694dc4f2734d0cb AS mise
 # The terminal on the manager page is xterm.js, vendored here from
 # ui/package-lock.json: npm ci checks every package against the lockfile's
 # hash and runs none of their install scripts. Dependabot keeps the lockfile
